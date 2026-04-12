@@ -23,6 +23,7 @@ from .orchestrator import PostTrainOrchestrator
 from .registry import ModelRegistry
 from .replay_buffer import ReplayBuffer
 from .runtime import PostTrainRuntime
+from .serve import RegistryModelRouter, ServeManagerBase, VLLMServeManager
 
 __all__ = [
     "BuilderConfig",
@@ -35,9 +36,12 @@ __all__ = [
     "PostTrainOrchestrator",
     "PromotionGate",
     "ReplayBuffer",
+    "RegistryModelRouter",
     "SmokeSearchGate",
     "StaticValidationGate",
     "UnifiedCollector",
+    "ServeManagerBase",
+    "VLLMServeManager",
     "load_posttrain_config",
     "PostTrainConfig",
     "PostTrainLLMProxy",
