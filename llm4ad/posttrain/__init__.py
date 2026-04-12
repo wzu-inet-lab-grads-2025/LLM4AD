@@ -22,12 +22,14 @@ from .llm_proxy import PostTrainLLMProxy
 from .orchestrator import PostTrainOrchestrator
 from .registry import ModelRegistry
 from .replay_buffer import ReplayBuffer
+from .rewards import CompositeReward, RewardProviderBase, RewardShaperBase
 from .runtime import PostTrainRuntime
 from .serve import RegistryModelRouter, ServeManagerBase, VLLMServeManager
 
 __all__ = [
     "BuilderConfig",
     "CollectorConfig",
+    "CompositeReward",
     "EvalTraceRecorder",
     "EventStore",
     "EventStoreConfig",
@@ -48,7 +50,9 @@ __all__ = [
     "PostTrainRuntime",
     "RegistryConfig",
     "ReplayBufferConfig",
+    "RewardProviderBase",
     "RewardConfig",
+    "RewardShaperBase",
     "RoundConfig",
     "ServeConfig",
     "SynthesizeConfig",
