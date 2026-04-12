@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
+from .augment import DedupAugmenter
 from .builders import OutcomeBuilder, PreferenceBuilder
 from .collector import UnifiedCollector
 from .formatters import TrlChatFormatter, TrlPreferenceFormatter
@@ -54,6 +55,8 @@ class PostTrainOrchestrator:
     ):
         search_report = workflow.run_search_round(resume_path=resume_path)
         records = self.collect_round_data(workflow, search_report)
+        records = self.run_augment(records)
+        records = self.run_synthesize(records)
         self.replay_buffer.add_records(records)
         dataset_manifests = self.build_datasets(records, search_report=search_report)
         candidate = self.train_candidate(dataset_manifests)
@@ -85,6 +88,12 @@ class PostTrainOrchestrator:
             round_id=self.runtime.round_id,
             method_name=workflow.config.workflow.method_name,
         )
+
+    def run_augment(self, records):
+        return DedupAugmenter().augment(records, context=self.runtime.snapshot())
+
+    def run_synthesize(self, records):
+        return records
 
     def build_datasets(self, records, *, search_report) -> dict[str, DatasetManifest]:
         datasets_dir = self._get_datasets_dir(search_report.get("log_dir"))

@@ -25,6 +25,7 @@ from .replay_buffer import ReplayBuffer
 from .rewards import CompositeReward, RewardProviderBase, RewardShaperBase
 from .runtime import PostTrainRuntime
 from .serve import RegistryModelRouter, ServeManagerBase, VLLMServeManager
+from .synthesize import SynthesizeStrategyBase
 
 __all__ = [
     "BuilderConfig",
@@ -55,6 +56,7 @@ __all__ = [
     "RewardShaperBase",
     "RoundConfig",
     "ServeConfig",
+    "SynthesizeStrategyBase",
     "SynthesizeConfig",
     "TrainerConfig",
     "WorkflowConfig",
