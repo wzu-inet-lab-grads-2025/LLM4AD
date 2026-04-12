@@ -1,0 +1,9 @@
+pyyaml
+transformers
+datasets
+accelerate
+peft
+trl
+safetensors
+bitsandbytes
+vllm
