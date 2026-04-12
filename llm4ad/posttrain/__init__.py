@@ -14,17 +14,21 @@ from .config import (
     WorkflowConfig,
 )
 from .config_loader import load_posttrain_config
+from .eval_trace import EvalTraceRecorder
 from .event_store import EventStore
+from .llm_proxy import PostTrainLLMProxy
 from .runtime import PostTrainRuntime
 
 __all__ = [
     "BuilderConfig",
     "CollectorConfig",
+    "EvalTraceRecorder",
     "EventStore",
     "EventStoreConfig",
     "GateConfig",
     "load_posttrain_config",
     "PostTrainConfig",
+    "PostTrainLLMProxy",
     "PostTrainRuntime",
     "RegistryConfig",
     "ReplayBufferConfig",
