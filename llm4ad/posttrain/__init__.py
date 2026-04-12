@@ -19,6 +19,7 @@ from .eval_trace import EvalTraceRecorder
 from .event_store import EventStore
 from .gates import PromotionGate, SmokeSearchGate, StaticValidationGate
 from .llm_proxy import PostTrainLLMProxy
+from .orchestrator import PostTrainOrchestrator
 from .registry import ModelRegistry
 from .replay_buffer import ReplayBuffer
 from .runtime import PostTrainRuntime
@@ -31,6 +32,7 @@ __all__ = [
     "EventStoreConfig",
     "GateConfig",
     "ModelRegistry",
+    "PostTrainOrchestrator",
     "PromotionGate",
     "ReplayBuffer",
     "SmokeSearchGate",
