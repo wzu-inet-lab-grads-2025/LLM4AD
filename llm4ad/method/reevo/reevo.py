@@ -35,26 +35,36 @@ from .population import Population
 from .profiler import ReEvoProfiler
 from .prompt import ReEvoPrompt
 from ...base import (
-    Evaluation, LLM, Function, Program, TextFunctionProgramConverter, SecureEvaluator, SampleTrimmer
+    Evaluation,
+    LLM,
+    Function,
+    Program,
+    TextFunctionProgramConverter,
+    SecureEvaluator,
+    SampleTrimmer,
 )
 from ...tools.profiler import ProfilerBase
 
 
 class ReEvo:
-    def __init__(self,
-                 llm: LLM,
-                 evaluation: Evaluation,
-                 profiler: ProfilerBase = None,
-                 max_sample_nums: Optional[int] = 100,
-                 pop_size: Optional[int] = 20,
-                 mutation_rate: float = 0.5,
-                 num_samplers: int = 1,
-                 num_evaluators: int = 1,
-                 *,
-                 resume_mode: bool = False,
-                 debug_mode: bool = False,
-                 multi_thread_or_process_eval: Literal['thread', 'process'] = 'thread',
-                 **kwargs):
+    def __init__(
+        self,
+        llm: LLM,
+        evaluation: Evaluation,
+        profiler: ProfilerBase = None,
+        max_sample_nums: Optional[int] = 100,
+        pop_size: Optional[int] = 20,
+        mutation_rate: float = 0.5,
+        num_samplers: int = 1,
+        num_evaluators: int = 1,
+        *,
+        resume_mode: bool = False,
+        debug_mode: bool = False,
+        multi_thread_or_process_eval: Literal["thread", "process"] = "thread",
+        posttrain_runtime=None,
+        posttrain_adapter=None,
+        **kwargs,
+    ):
         """Reflective Evolution.
         Args:
             llm             : an instance of 'llm4ad.base.LLM', which provides the way to query LLM.
@@ -85,27 +95,35 @@ class ReEvo:
         self._num_evaluators = num_evaluators
         self._resume_mode = resume_mode
         self._debug_mode = debug_mode
+        self._posttrain_runtime = posttrain_runtime
+        self._posttrain_adapter = posttrain_adapter
         llm.debug_mode = debug_mode
         self._multi_thread_or_process_eval = multi_thread_or_process_eval
         self._MAX_SHORT_TERM_REFLECTION_PROMPT = 5
 
         # function to be evolved
-        self._function_to_evolve: Function = TextFunctionProgramConverter.text_to_function(self._template_program_str)
+        self._function_to_evolve: Function = (
+            TextFunctionProgramConverter.text_to_function(self._template_program_str)
+        )
         self._function_to_evolve_name: str = self._function_to_evolve.name
-        self._template_program: Program = TextFunctionProgramConverter.text_to_program(self._template_program_str)
+        self._template_program: Program = TextFunctionProgramConverter.text_to_program(
+            self._template_program_str
+        )
 
         # population, sampler, and evaluator
         self._population = Population(pop_size=self._pop_size)
         self._sampler = SampleTrimmer(llm)
         self._evaluator = SecureEvaluator(evaluation, debug_mode=debug_mode, **kwargs)
         self._profiler = profiler
+        if self._posttrain_adapter is not None:
+            self._posttrain_adapter.bind(self, self._posttrain_runtime)
 
         # statistics
         self._tot_sample_nums = 0
 
         # multi-thread executor for evaluation
-        assert multi_thread_or_process_eval in ['thread', 'process']
-        if multi_thread_or_process_eval == 'thread':
+        assert multi_thread_or_process_eval in ["thread", "process"]
+        if multi_thread_or_process_eval == "thread":
             self._evaluation_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=num_evaluators
             )
@@ -125,24 +143,48 @@ class ReEvo:
         3. Add the function to the population and register it to the profiler.
         """
         sample_start = time.time()
+        if self._posttrain_adapter is not None:
+            self._posttrain_adapter.before_sample(prompt=prompt)
         func = self._sampler.draw_sample(prompt)
         func = SampleTrimmer.sample_to_function(func, self._template_program)
         sample_time = time.time() - sample_start
         if func is None:
+            if self._posttrain_adapter is not None:
+                self._posttrain_adapter.on_parse_failure(
+                    error_type="SampleParseFailure",
+                    error_message="Failed to parse the generated sample into a function.",
+                )
             return
         # convert to Program instance
-        program = TextFunctionProgramConverter.function_to_program(func, self._template_program)
+        program = TextFunctionProgramConverter.function_to_program(
+            func, self._template_program
+        )
         if program is None:
+            if self._posttrain_adapter is not None:
+                self._posttrain_adapter.on_program_failure(
+                    error_type="ProgramBuildFailure",
+                    error_message="Failed to convert generated function into an executable program.",
+                )
             return
         # evaluate
         score, eval_time = self._evaluation_executor.submit(
-            self._evaluator.evaluate_program_record_time,
-            program
+            self._evaluator.evaluate_program_record_time, program
         ).result()
         # register to profiler
         func.score = score
         func.evaluate_time = eval_time
         func.sample_time = sample_time
+        if self._posttrain_adapter is not None:
+            self._posttrain_runtime.set_generation(self._population.generation)
+            self._posttrain_adapter.after_evaluate(
+                prompt=prompt,
+                function=func,
+                program=str(program),
+                algorithm=getattr(func, "algorithm", None),
+                score=score,
+                sample_time=sample_time,
+                eval_time=eval_time,
+            )
         if self._profiler is not None:
             self._profiler.register_function(func, program=str(program))
             if isinstance(self._profiler, ReEvoProfiler):
@@ -151,6 +193,10 @@ class ReEvo:
 
         # register to the population
         self._population.register_function(func)
+        if self._posttrain_adapter is not None:
+            self._posttrain_adapter.after_register(
+                function=func, population=self._population
+            )
 
     def _iteratively_ga_evolve(self):
         short_term_reflection_prompts = []
@@ -158,33 +204,70 @@ class ReEvo:
         crx_samples_generated_by_cur_thread = 0
 
         while self._tot_sample_nums < self._max_sample_nums:
+            if (
+                self._posttrain_adapter is not None
+                and self._posttrain_adapter.should_stop_round(self)
+            ):
+                break
             try:
                 # short term reflection
                 indivs = [self._population.selection() for _ in range(2)]
-                short_term_reflection_prompt = ReEvoPrompt.get_short_term_reflection_prompt(self._task_description_str,
-                                                                                            indivs)
+                if self._posttrain_runtime is not None:
+                    self._posttrain_runtime.set_phase("search")
+                    self._posttrain_runtime.set_operator("short_reflection")
+                    self._posttrain_runtime.set_parents(None)
+                    self._posttrain_runtime.set_generation(self._population.generation)
+                short_term_reflection_prompt = (
+                    ReEvoPrompt.get_short_term_reflection_prompt(
+                        self._task_description_str, indivs
+                    )
+                )
 
                 if self._debug_mode:
-                    print(f'--------------------------------------------------------------------')
-                    print(f'Short Term Reflection Prompt-1: \n{short_term_reflection_prompt}')
-                    print(f'--------------------------------------------------------------------\n\n')
+                    print(
+                        f"--------------------------------------------------------------------"
+                    )
+                    print(
+                        f"Short Term Reflection Prompt-1: \n{short_term_reflection_prompt}"
+                    )
+                    print(
+                        f"--------------------------------------------------------------------\n\n"
+                    )
 
-                short_term_reflection_prompt = self._sampler.llm.draw_sample(short_term_reflection_prompt)
+                short_term_reflection_prompt = self._sampler.llm.draw_sample(
+                    short_term_reflection_prompt
+                )
                 short_term_reflection_prompts.append(short_term_reflection_prompt)
 
                 if self._debug_mode:
-                    print(f'--------------------------------------------------------------------')
-                    print(f'Short Term Reflection Prompt-2: \n{short_term_reflection_prompt}')
-                    print(f'--------------------------------------------------------------------\n\n')
+                    print(
+                        f"--------------------------------------------------------------------"
+                    )
+                    print(
+                        f"Short Term Reflection Prompt-2: \n{short_term_reflection_prompt}"
+                    )
+                    print(
+                        f"--------------------------------------------------------------------\n\n"
+                    )
 
                 # crossover
-                crx_prompt = ReEvoPrompt.get_crossover_prompt(self._task_description_str, short_term_reflection_prompt,
-                                                              indivs)
+                if self._posttrain_runtime is not None:
+                    self._posttrain_runtime.set_phase("search")
+                    self._posttrain_runtime.set_operator("crossover")
+                    self._posttrain_runtime.set_parents(None)
+                    self._posttrain_runtime.set_generation(self._population.generation)
+                crx_prompt = ReEvoPrompt.get_crossover_prompt(
+                    self._task_description_str, short_term_reflection_prompt, indivs
+                )
 
                 if self._debug_mode:
-                    print(f'--------------------------------------------------------------------')
-                    print(f'Crossover Prompt: \n{crx_prompt}')
-                    print(f'--------------------------------------------------------------------\n\n')
+                    print(
+                        f"--------------------------------------------------------------------"
+                    )
+                    print(f"Crossover Prompt: \n{crx_prompt}")
+                    print(
+                        f"--------------------------------------------------------------------\n\n"
+                    )
 
                 self._sample_evaluate_register(crx_prompt)
                 crx_samples_generated_by_cur_thread += 1
@@ -192,37 +275,81 @@ class ReEvo:
                     break
 
                 # assume that current thread has generated a population of algorithms
-                if crx_samples_generated_by_cur_thread > 0 and crx_samples_generated_by_cur_thread % self._pop_size == 0:
+                if (
+                    crx_samples_generated_by_cur_thread > 0
+                    and crx_samples_generated_by_cur_thread % self._pop_size == 0
+                ):
                     # long term reflection
-                    long_term_reflection_prompt = ReEvoPrompt.get_long_term_reflection_prompt(
-                        self._task_description_str,
-                        long_term_reflection_prompts[-1] if long_term_reflection_prompts else '',
-                        short_term_reflection_prompts[-self._MAX_SHORT_TERM_REFLECTION_PROMPT:],
+                    if self._posttrain_runtime is not None:
+                        self._posttrain_runtime.set_phase("search")
+                        self._posttrain_runtime.set_operator("long_reflection")
+                        self._posttrain_runtime.set_parents(None)
+                        self._posttrain_runtime.set_generation(
+                            self._population.generation
+                        )
+                    long_term_reflection_prompt = (
+                        ReEvoPrompt.get_long_term_reflection_prompt(
+                            self._task_description_str,
+                            long_term_reflection_prompts[-1]
+                            if long_term_reflection_prompts
+                            else "",
+                            short_term_reflection_prompts[
+                                -self._MAX_SHORT_TERM_REFLECTION_PROMPT :
+                            ],
+                        )
                     )
 
                     if self._debug_mode:
-                        print(f'--------------------------------------------------------------------')
-                        print(f'Long Term Reflection Prompt-1: \n{long_term_reflection_prompt}')
-                        print(f'--------------------------------------------------------------------\n\n')
+                        print(
+                            f"--------------------------------------------------------------------"
+                        )
+                        print(
+                            f"Long Term Reflection Prompt-1: \n{long_term_reflection_prompt}"
+                        )
+                        print(
+                            f"--------------------------------------------------------------------\n\n"
+                        )
 
-                    long_term_reflection_prompt = self._sampler.llm.draw_sample(long_term_reflection_prompt)
+                    long_term_reflection_prompt = self._sampler.llm.draw_sample(
+                        long_term_reflection_prompt
+                    )
                     long_term_reflection_prompts.append(long_term_reflection_prompt)
 
                     if self._debug_mode:
-                        print(f'--------------------------------------------------------------------')
-                        print(f'Long Term Reflection Prompt-2: \n{long_term_reflection_prompt}')
-                        print(f'--------------------------------------------------------------------\n\n')
+                        print(
+                            f"--------------------------------------------------------------------"
+                        )
+                        print(
+                            f"Long Term Reflection Prompt-2: \n{long_term_reflection_prompt}"
+                        )
+                        print(
+                            f"--------------------------------------------------------------------\n\n"
+                        )
 
                     # mutation
                     for _ in range(int(self._mutation_rate * self._pop_size)):
                         func = self._population.elite_function
-                        mutation_prompt = ReEvoPrompt.get_elist_mutation_prompt(self._task_description_str,
-                                                                                long_term_reflection_prompt, func)
+                        if self._posttrain_runtime is not None:
+                            self._posttrain_runtime.set_phase("search")
+                            self._posttrain_runtime.set_operator("mutation")
+                            self._posttrain_runtime.set_parents(None)
+                            self._posttrain_runtime.set_generation(
+                                self._population.generation
+                            )
+                        mutation_prompt = ReEvoPrompt.get_elist_mutation_prompt(
+                            self._task_description_str,
+                            long_term_reflection_prompt,
+                            func,
+                        )
 
                         if self._debug_mode:
-                            print(f'--------------------------------------------------------------------')
-                            print(f'Elite mutation: \n{mutation_prompt}')
-                            print(f'--------------------------------------------------------------------\n\n')
+                            print(
+                                f"--------------------------------------------------------------------"
+                            )
+                            print(f"Elite mutation: \n{mutation_prompt}")
+                            print(
+                                f"--------------------------------------------------------------------\n\n"
+                            )
 
                         self._sample_evaluate_register(mutation_prompt)
 
@@ -248,11 +375,23 @@ class ReEvo:
         to initialize a population.
         """
         while self._population.generation == 0:
+            if (
+                self._posttrain_adapter is not None
+                and self._posttrain_adapter.should_stop_round(self)
+            ):
+                break
             try:
                 # get a new func using i1
-                prompt = ReEvoPrompt.get_pop_init_prompt(self._task_description_str, self._function_to_evolve)
+                if self._posttrain_runtime is not None:
+                    self._posttrain_runtime.set_phase("init")
+                    self._posttrain_runtime.set_operator("init")
+                    self._posttrain_runtime.set_parents(None)
+                    self._posttrain_runtime.set_generation(self._population.generation)
+                prompt = ReEvoPrompt.get_pop_init_prompt(
+                    self._task_description_str, self._function_to_evolve
+                )
                 if self._debug_mode:
-                    print(f'Init Prompt: {prompt}')
+                    print(f"Init Prompt: {prompt}")
                 self._sample_evaluate_register(prompt)
             except Exception:
                 if self._debug_mode:
