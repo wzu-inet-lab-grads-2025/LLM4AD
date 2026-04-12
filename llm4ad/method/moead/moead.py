@@ -36,32 +36,41 @@ from .profiler import MOEADProfiler
 from .prompt import MOEADPrompt
 from .sampler import MOEADSampler
 from ...base import (
-    Evaluation, LLM, Function, Program, TextFunctionProgramConverter, SecureEvaluator
+    Evaluation,
+    LLM,
+    Function,
+    Program,
+    TextFunctionProgramConverter,
+    SecureEvaluator,
 )
 from ...tools.profiler import ProfilerBase
 
 
 class MOEAD:
-    def __init__(self,
-                 llm: LLM,
-                 evaluation: Evaluation,
-                 profiler: ProfilerBase = None,
-                 max_generations: int | None = 10,
-                 max_sample_nums: int | None = 100,
-                 pop_size: int = 20,
-                 selection_num=5,
-                 use_e2_operator: bool = True,
-                 use_m1_operator: bool = True,
-                 use_m2_operator: bool = True,
-                 num_samplers: int = 1,
-                 num_evaluators: int = 1,
-                 num_objs: int = 2,
-                 *,
-                 resume_mode: bool = False,
-                 initial_sample_num: int | None = None,
-                 debug_mode: bool = False,
-                 multi_thread_or_process_eval: str = 'thread',
-                 **kwargs):
+    def __init__(
+        self,
+        llm: LLM,
+        evaluation: Evaluation,
+        profiler: ProfilerBase = None,
+        max_generations: int | None = 10,
+        max_sample_nums: int | None = 100,
+        pop_size: int = 20,
+        selection_num=5,
+        use_e2_operator: bool = True,
+        use_m1_operator: bool = True,
+        use_m2_operator: bool = True,
+        num_samplers: int = 1,
+        num_evaluators: int = 1,
+        num_objs: int = 2,
+        *,
+        resume_mode: bool = False,
+        initial_sample_num: int | None = None,
+        debug_mode: bool = False,
+        multi_thread_or_process_eval: str = "thread",
+        posttrain_runtime=None,
+        posttrain_adapter=None,
+        **kwargs,
+    ):
         """
         Args:
             llm             : an instance of 'llm4ad.base.LLM', which provides the way to query LLM.
@@ -98,12 +107,18 @@ class MOEAD:
         self._resume_mode = resume_mode
         self._initial_sample_num = initial_sample_num
         self._debug_mode = debug_mode
+        self._posttrain_runtime = posttrain_runtime
+        self._posttrain_adapter = posttrain_adapter
         self._multi_thread_or_process_eval = multi_thread_or_process_eval
 
         # function to be evolved
-        self._function_to_evolve: Function = TextFunctionProgramConverter.text_to_function(self._template_program_str)
+        self._function_to_evolve: Function = (
+            TextFunctionProgramConverter.text_to_function(self._template_program_str)
+        )
         self._function_to_evolve_name: str = self._function_to_evolve.name
-        self._template_program: Program = TextFunctionProgramConverter.text_to_program(self._template_program_str)
+        self._template_program: Program = TextFunctionProgramConverter.text_to_program(
+            self._template_program_str
+        )
 
         # population, sampler, and evaluator
         self._population = Population(pop_size=self._pop_size)
@@ -111,6 +126,8 @@ class MOEAD:
         self._sampler = MOEADSampler(llm, self._template_program_str)
         self._evaluator = SecureEvaluator(evaluation, debug_mode=debug_mode, **kwargs)
         self._profiler = profiler
+        if self._posttrain_adapter is not None:
+            self._posttrain_adapter.bind(self, self._posttrain_runtime)
         if profiler is not None:
             self._profiler.record_parameters(llm, evaluation, self)  # ZL: Necessary
 
@@ -118,8 +135,8 @@ class MOEAD:
         self._tot_sample_nums = 0 if initial_sample_num is None else initial_sample_num
 
         # multi-thread executor for evaluation
-        assert multi_thread_or_process_eval in ['thread', 'process']
-        if multi_thread_or_process_eval == 'thread':
+        assert multi_thread_or_process_eval in ["thread", "process"]
+        if multi_thread_or_process_eval == "thread":
             self._evaluation_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=num_evaluators
             )
@@ -133,20 +150,33 @@ class MOEAD:
         add the function to the population and register it to the profiler.
         """
         sample_start = time.time()
+        if self._posttrain_adapter is not None:
+            self._posttrain_adapter.before_sample(prompt=prompt)
         thought, func = self._sampler.get_thought_and_function(prompt)
         sample_time = time.time() - sample_start
         if thought is None or func is None:
+            if self._posttrain_adapter is not None:
+                self._posttrain_adapter.on_parse_failure(
+                    error_type="SampleParseFailure",
+                    error_message="Failed to extract thought or function from the model response.",
+                )
             return
 
         # convert to Program instance
-        program = TextFunctionProgramConverter.function_to_program(func, self._template_program)
+        program = TextFunctionProgramConverter.function_to_program(
+            func, self._template_program
+        )
         if program is None:
+            if self._posttrain_adapter is not None:
+                self._posttrain_adapter.on_program_failure(
+                    error_type="ProgramBuildFailure",
+                    error_message="Failed to convert generated function into an executable program.",
+                )
             return
 
         # evaluate
         score, eval_time = self._evaluation_executor.submit(
-            self._evaluator.evaluate_program_record_time,
-            program
+            self._evaluator.evaluate_program_record_time, program
         ).result()
 
         # score
@@ -154,6 +184,17 @@ class MOEAD:
         func.evaluate_time = eval_time
         func.algorithm = thought
         func.sample_time = sample_time
+        if self._posttrain_adapter is not None:
+            self._posttrain_runtime.set_generation(self._population.generation)
+            self._posttrain_adapter.after_evaluate(
+                prompt=prompt,
+                function=func,
+                program=str(program),
+                algorithm=thought,
+                score=score,
+                sample_time=sample_time,
+                eval_time=eval_time,
+            )
         try:
             if self._profiler is not None:
                 self._profiler.register_function(func, program=str(program))
@@ -165,10 +206,18 @@ class MOEAD:
 
         # register to the population
         self._population.register_function(func)
+        if self._posttrain_adapter is not None:
+            self._posttrain_adapter.after_register(
+                function=func, population=self._population
+            )
 
     def _continue_sample(self):
-        """Check if it meets the max_sample_nums restrictions.
-        """
+        """Check if it meets the max_sample_nums restrictions."""
+        if (
+            self._posttrain_adapter is not None
+            and self._posttrain_adapter.should_stop_round(self)
+        ):
+            return False
         if self._max_generations is None and self._max_sample_nums is None:
             return True
         if self._max_generations is None and self._max_sample_nums is not None:
@@ -196,8 +245,21 @@ class MOEAD:
                 for i in range(self._pop_size):
                     crt_pref = self._population._weight_vectors[:, i]
                     # get a new func using e1
-                    indivs = [self._population.selection(crt_pref) for _ in range(self._selection_num)]
-                    prompt = MOEADPrompt.get_prompt_e1(self._task_description_str, indivs, self._function_to_evolve)
+                    indivs = [
+                        self._population.selection(crt_pref)
+                        for _ in range(self._selection_num)
+                    ]
+                    if self._posttrain_runtime is not None:
+                        self._posttrain_runtime.set_phase("search")
+                        self._posttrain_runtime.set_operator("e1")
+                        self._posttrain_runtime.set_parents(None)
+                        self._posttrain_runtime.set_generation(
+                            self._population.generation
+                        )
+                        self._posttrain_runtime.set_extra(subproblem_index=i)
+                    prompt = MOEADPrompt.get_prompt_e1(
+                        self._task_description_str, indivs, self._function_to_evolve
+                    )
 
                     if self._debug_mode:
                         print(prompt)
@@ -209,8 +271,21 @@ class MOEAD:
 
                     # get a new func using e2
                     if self._use_e2_operator:
-                        indivs = [self._population.selection(crt_pref) for _ in range(self._selection_num)]
-                        prompt = MOEADPrompt.get_prompt_e2(self._task_description_str, indivs, self._function_to_evolve)
+                        indivs = [
+                            self._population.selection(crt_pref)
+                            for _ in range(self._selection_num)
+                        ]
+                        if self._posttrain_runtime is not None:
+                            self._posttrain_runtime.set_phase("search")
+                            self._posttrain_runtime.set_operator("e2")
+                            self._posttrain_runtime.set_parents(None)
+                            self._posttrain_runtime.set_generation(
+                                self._population.generation
+                            )
+                            self._posttrain_runtime.set_extra(subproblem_index=i)
+                        prompt = MOEADPrompt.get_prompt_e2(
+                            self._task_description_str, indivs, self._function_to_evolve
+                        )
 
                         if self._debug_mode:
                             print(prompt)
@@ -223,7 +298,17 @@ class MOEAD:
                     # get a new func using m1
                     if self._use_m1_operator:
                         indiv = self._population.selection(crt_pref)
-                        prompt = MOEADPrompt.get_prompt_m1(self._task_description_str, indiv, self._function_to_evolve)
+                        if self._posttrain_runtime is not None:
+                            self._posttrain_runtime.set_phase("search")
+                            self._posttrain_runtime.set_operator("m1")
+                            self._posttrain_runtime.set_parents(None)
+                            self._posttrain_runtime.set_generation(
+                                self._population.generation
+                            )
+                            self._posttrain_runtime.set_extra(subproblem_index=i)
+                        prompt = MOEADPrompt.get_prompt_m1(
+                            self._task_description_str, indiv, self._function_to_evolve
+                        )
 
                         if self._debug_mode:
                             print(prompt)
@@ -236,7 +321,17 @@ class MOEAD:
                     # get a new func using m2
                     if self._use_m2_operator:
                         indiv = self._population.selection(crt_pref)
-                        prompt = MOEADPrompt.get_prompt_m2(self._task_description_str, indiv, self._function_to_evolve)
+                        if self._posttrain_runtime is not None:
+                            self._posttrain_runtime.set_phase("search")
+                            self._posttrain_runtime.set_operator("m2")
+                            self._posttrain_runtime.set_parents(None)
+                            self._posttrain_runtime.set_generation(
+                                self._population.generation
+                            )
+                            self._posttrain_runtime.set_extra(subproblem_index=i)
+                        prompt = MOEADPrompt.get_prompt_m2(
+                            self._task_description_str, indiv, self._function_to_evolve
+                        )
 
                         if self._debug_mode:
                             print(prompt)
@@ -268,7 +363,14 @@ class MOEAD:
                 break
             try:
                 # get a new func using i1
-                prompt = MOEADPrompt.get_prompt_i1(self._task_description_str, self._function_to_evolve)
+                if self._posttrain_runtime is not None:
+                    self._posttrain_runtime.set_phase("init")
+                    self._posttrain_runtime.set_operator("init")
+                    self._posttrain_runtime.set_parents(None)
+                    self._posttrain_runtime.set_generation(self._population.generation)
+                prompt = MOEADPrompt.get_prompt_i1(
+                    self._task_description_str, self._function_to_evolve
+                )
                 self._sample_evaluate_register(prompt)
             except Exception as e:
                 if self._debug_mode:
@@ -281,7 +383,8 @@ class MOEAD:
         sampler_threads = [
             Thread(
                 target=self._thread_init_population,
-            ) for _ in range(self._num_samplers)
+            )
+            for _ in range(self._num_samplers)
         ]
         for t in sampler_threads:
             t.start()
@@ -292,7 +395,8 @@ class MOEAD:
         sampler_threads = [
             Thread(
                 target=self._thread_do_evolutionary_operator,
-            ) for _ in range(self._num_samplers)
+            )
+            for _ in range(self._num_samplers)
         ]
         for t in sampler_threads:
             t.start()
@@ -304,7 +408,16 @@ class MOEAD:
             # do init
             self._population = Population(pop_size=self._pop_size)
             self._init_population()
-            while len([f for f in self._population if not np.isinf(np.array(f.score)).any()]) < self._selection_num:
+            while (
+                len(
+                    [
+                        f
+                        for f in self._population
+                        if not np.isinf(np.array(f.score)).any()
+                    ]
+                )
+                < self._selection_num
+            ):
                 self._population._generation -= 1
                 self._init_population()
         # do evolve

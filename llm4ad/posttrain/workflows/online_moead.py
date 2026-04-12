@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from llm4ad.method.moead import MOEAD
+from llm4ad.method.moead.resume import resume_moead
+
+from llm4ad.posttrain.adapters import EvolutionAdapter
+
+from .online_round import OnlineRoundWorkflow
+
+
+class MOEADOnlineWorkflow(OnlineRoundWorkflow):
+    def build_adapter(self):
+        return EvolutionAdapter(
+            round_config=self.config.round,
+            event_store=self.event_store,
+        )
+
+    def build_method(self, llm, evaluation, profiler, adapter):
+        return MOEAD(
+            llm=llm,
+            evaluation=evaluation,
+            profiler=profiler,
+            posttrain_runtime=self.runtime,
+            posttrain_adapter=adapter,
+            eval_trace_recorder=self.eval_trace_recorder,
+            **self.method_kwargs,
+        )
+
+    def get_resume_fn(self):
+        return resume_moead
+
+
+def run_online_moead(
+    *,
+    config,
+    llm,
+    evaluation,
+    profiler=None,
+    method_kwargs=None,
+    runtime,
+    event_store,
+    resume_path=None,
+):
+    workflow = MOEADOnlineWorkflow(
+        config=config,
+        llm=llm,
+        evaluation=evaluation,
+        profiler=profiler,
+        method_kwargs=method_kwargs,
+        runtime=runtime,
+        event_store=event_store,
+    )
+    return workflow.run_search_round(resume_path=resume_path)
