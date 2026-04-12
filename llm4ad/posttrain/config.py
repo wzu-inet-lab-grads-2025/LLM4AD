@@ -55,6 +55,17 @@ class TrainerConfig:
     backend: Literal["trl_sft", "trl_dpo", "trl_grpo"] = "trl_sft"
     base_model: str = ""
     output_adapter_only: bool = True
+    execution_mode: Literal["python", "subprocess"] = "python"
+    output_root: str = "artifacts/posttrain/training"
+    per_device_train_batch_size: int = 1
+    gradient_accumulation_steps: int = 1
+    num_train_epochs: float = 1.0
+    learning_rate: float = 1e-5
+    max_length: int = 2048
+    max_prompt_length: int = 1024
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
 
 
 @dataclass(slots=True)
