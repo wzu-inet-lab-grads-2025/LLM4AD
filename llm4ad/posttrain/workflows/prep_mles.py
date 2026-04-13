@@ -43,7 +43,15 @@ class MLESPrepWorkflow(BaseWorkflow):
 
 
 def run_prep_mles(
-    *, config, llm, evaluation, profiler=None, method_kwargs=None, runtime, event_store
+    *,
+    config,
+    llm,
+    evaluation,
+    profiler=None,
+    method_kwargs=None,
+    runtime,
+    event_store,
+    llm_builder=None,
 ):
     workflow = build_prep_mles_workflow(
         config=config,
@@ -53,6 +61,7 @@ def run_prep_mles(
         method_kwargs=method_kwargs,
         runtime=runtime,
         event_store=event_store,
+        llm_builder=llm_builder,
     )
     return workflow.run_collection()
 
@@ -66,6 +75,7 @@ def build_prep_mles_workflow(
     method_kwargs=None,
     runtime,
     event_store,
+    llm_builder=None,
 ):
     return MLESPrepWorkflow(
         config=config,
@@ -75,4 +85,5 @@ def build_prep_mles_workflow(
         method_kwargs=method_kwargs,
         runtime=runtime,
         event_store=event_store,
+        llm_builder=llm_builder,
     )

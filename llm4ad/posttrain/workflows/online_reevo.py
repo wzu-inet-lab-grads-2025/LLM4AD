@@ -38,6 +38,7 @@ def run_online_reevo(
     method_kwargs=None,
     runtime,
     event_store,
+    llm_builder=None,
     resume_path=None,
 ):
     workflow = build_online_reevo_workflow(
@@ -48,6 +49,7 @@ def run_online_reevo(
         method_kwargs=method_kwargs,
         runtime=runtime,
         event_store=event_store,
+        llm_builder=llm_builder,
     )
     return workflow.run_search_round(resume_path=resume_path)
 
@@ -61,6 +63,7 @@ def build_online_reevo_workflow(
     method_kwargs=None,
     runtime,
     event_store,
+    llm_builder=None,
 ):
     return ReEvoOnlineWorkflow(
         config=config,
@@ -70,4 +73,5 @@ def build_online_reevo_workflow(
         method_kwargs=method_kwargs,
         runtime=runtime,
         event_store=event_store,
+        llm_builder=llm_builder,
     )

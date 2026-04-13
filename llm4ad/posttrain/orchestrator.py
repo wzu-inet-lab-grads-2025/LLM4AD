@@ -63,7 +63,10 @@ class PostTrainOrchestrator:
         dataset_manifests = self.build_datasets(records, search_report=search_report)
         candidate = self.train_candidate(dataset_manifests)
         gate_report = self.evaluate_candidate(
-            candidate, validation_spec=validation_spec, smoke_spec=smoke_spec
+            candidate,
+            validation_spec=validation_spec,
+            smoke_spec=smoke_spec,
+            search_report=search_report,
         )
         promotion = self.maybe_promote(candidate, gate_report)
         report = {
@@ -192,7 +195,9 @@ class PostTrainOrchestrator:
         self.registry.register_candidate(candidate)
         return candidate
 
-    def evaluate_candidate(self, candidate, *, validation_spec=None, smoke_spec=None):
+    def evaluate_candidate(
+        self, candidate, *, validation_spec=None, smoke_spec=None, search_report=None
+    ):
         if candidate is None:
             return {
                 "passed": False,
@@ -210,13 +215,19 @@ class PostTrainOrchestrator:
             "version_id": "base",
             "path": self.config.trainer.base_model,
         }
+        gate_context = {
+            "run_context": self.runtime.snapshot(),
+            "smoke_resume_path": None
+            if search_report is None
+            else search_report.get("log_dir"),
+        }
         return self.gate.evaluate(
             asdict(candidate) if is_dataclass(candidate) else candidate,
             active,
             base,
             validation_spec=validation_spec,
             smoke_spec=smoke_spec,
-            context=self.runtime.snapshot(),
+            context=gate_context,
         )
 
     def maybe_promote(self, candidate, gate_report):

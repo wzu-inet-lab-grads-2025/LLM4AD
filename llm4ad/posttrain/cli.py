@@ -76,6 +76,7 @@ def cmd_run_workflow(args):
     profiler_factory = (
         None if args.profiler_factory is None else _load_symbol(args.profiler_factory)
     )
+    llm_builder = None if args.llm_builder is None else _load_symbol(args.llm_builder)
 
     llm = llm_factory(config=config)
     evaluation = evaluation_factory(config=config)
@@ -104,6 +105,7 @@ def cmd_run_workflow(args):
         method_kwargs=method_kwargs,
         runtime=runtime,
         event_store=event_store,
+        llm_builder=llm_builder,
     )
 
     if args.use_orchestrator:
@@ -151,6 +153,7 @@ def build_parser():
     run_parser.add_argument("--llm-factory", required=True)
     run_parser.add_argument("--evaluation-factory", required=True)
     run_parser.add_argument("--profiler-factory")
+    run_parser.add_argument("--llm-builder")
     run_parser.add_argument("--method-kwargs")
     run_parser.add_argument("--resume-path")
     run_parser.add_argument("--event-root")
