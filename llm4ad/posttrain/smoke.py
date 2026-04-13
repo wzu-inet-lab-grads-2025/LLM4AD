@@ -82,11 +82,97 @@ class BestScoreExtractor:
 
 
 class WorkflowSmokeRunner:
-    def __init__(self, workflow_factory, *, score_extractor=None):
+    def __init__(
+        self,
+        workflow_factory,
+        *,
+        score_extractor=None,
+        compare_lines=("candidate", "active", "base"),
+        min_candidate_margin: float = 0.0,
+        maximize_metric: bool = True,
+    ):
         self._workflow_factory = workflow_factory
         self._score_extractor = score_extractor or BestScoreExtractor()
+        self._compare_lines = compare_lines
+        self._min_candidate_margin = min_candidate_margin
+        self._maximize_metric = maximize_metric
 
-    def __call__(self, *, model_ref, line_name, context=None):
+    def __call__(
+        self,
+        *,
+        model_ref=None,
+        line_name=None,
+        candidate=None,
+        active=None,
+        base=None,
+        context=None,
+    ):
+        if line_name is not None or model_ref is not None:
+            return self._run_single_line(
+                model_ref=model_ref,
+                line_name=line_name,
+                context=context,
+            )
+
+        refs = {
+            "candidate": candidate,
+            "active": active,
+            "base": base,
+        }
+        details = {}
+        scores = {}
+
+        for current_line in self._compare_lines:
+            ref = refs.get(current_line)
+            if ref is None:
+                details[current_line] = {
+                    "score": None,
+                    "result": None,
+                    "reason": "line unavailable",
+                }
+                continue
+            result = self._run_single_line(
+                model_ref=ref,
+                line_name=current_line,
+                context=context,
+            )
+            details[current_line] = result
+            score = result.get("score") if isinstance(result, dict) else None
+            scores[current_line] = score
+
+        candidate_score = scores.get("candidate")
+        if candidate_score is None:
+            return {
+                "passed": False,
+                "scores": scores,
+                "details": details,
+                "reason": "candidate score unavailable",
+            }
+
+        comparisons = {}
+        passed = True
+        for current_line in self._compare_lines:
+            if current_line == "candidate":
+                continue
+            other_score = scores.get(current_line)
+            if other_score is None:
+                comparisons[current_line] = None
+                continue
+            if self._maximize_metric:
+                ok = candidate_score >= other_score + self._min_candidate_margin
+            else:
+                ok = candidate_score <= other_score - self._min_candidate_margin
+            comparisons[current_line] = ok
+            passed = passed and ok
+
+        return {
+            "passed": passed,
+            "scores": scores,
+            "comparisons": comparisons,
+            "details": details,
+        }
+
+    def _run_single_line(self, *, model_ref, line_name, context=None):
         workflow = self._workflow_factory(
             model_ref=model_ref, line_name=line_name, context=context
         )

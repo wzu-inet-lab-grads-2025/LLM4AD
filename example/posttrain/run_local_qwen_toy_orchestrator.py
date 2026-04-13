@@ -97,10 +97,17 @@ def build_local_llm(
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--disable-smoke", action="store_true")
+    parser.add_argument("--smoke-max-samples", type=int, default=1)
+    args = parser.parse_args()
+
     model_path = "models/Qwen2.5-Coder-1.5B-Instruct"
     llm = LocalTransformersLLM(
         model_path=model_path,
-        max_new_tokens=64,
+        max_new_tokens=48,
         temperature=0.0,
         top_p=1.0,
     )
@@ -121,7 +128,8 @@ def main():
         ),
         gate=GateConfig(
             use_fixed_validation=False,
-            use_smoke_test=False,
+            use_smoke_test=not args.disable_smoke,
+            smoke_max_samples=args.smoke_max_samples,
         ),
     )
 

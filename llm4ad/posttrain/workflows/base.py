@@ -62,7 +62,12 @@ class BaseWorkflow:
             return None
         from llm4ad.posttrain.smoke import WorkflowSmokeRunner
 
-        return WorkflowSmokeRunner(self._build_smoke_workflow)
+        return WorkflowSmokeRunner(
+            self._build_smoke_workflow,
+            compare_lines=self.config.gate.smoke_compare_lines,
+            min_candidate_margin=self.config.gate.min_candidate_margin,
+            maximize_metric=self.config.gate.maximize_metric,
+        )
 
     def build_llm_for_model_ref(self, *, model_ref, line_name, context=None):
         if self.llm_builder is None:
