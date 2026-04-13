@@ -13,9 +13,12 @@ class ChatJsonlFormatter(DatasetFormatterBase):
         file_path = output_path / f"{dataset_name}.jsonl"
         with file_path.open("w", encoding="utf-8") as fh:
             for example in examples:
+                prompt = example["prompt"]
+                completion = example["completion"]
                 payload = {
-                    "prompt": example["prompt"],
-                    "completion": example["completion"],
+                    "prompt": prompt,
+                    "completion": completion,
+                    "text": f"{prompt}\n\n{completion}",
                     "score": example.get("score"),
                     "operator": example.get("operator"),
                     "phase": example.get("phase"),

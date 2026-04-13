@@ -66,6 +66,9 @@ class TrainerConfig:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
+    gradient_checkpointing: bool = True
+    use_cpu: bool = False
+    lora_target_modules: str | None = "all-linear"
 
 
 @dataclass(slots=True)

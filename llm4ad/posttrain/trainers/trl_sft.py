@@ -45,12 +45,8 @@ class TrlSftTrainer(TrainerBackendBase):
         try:
             from datasets import load_dataset
             from peft import LoraConfig
-            from transformers import (
-                AutoModelForCausalLM,
-                AutoTokenizer,
-                TrainingArguments,
-            )
-            from trl import SFTTrainer
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from trl import SFTConfig, SFTTrainer
         except ImportError as exc:  # pragma: no cover
             raise ImportError(
                 "Posttrain SFT requires requirements-posttrain.txt dependencies."
@@ -60,7 +56,17 @@ class TrlSftTrainer(TrainerBackendBase):
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        model = AutoModelForCausalLM.from_pretrained(train_config.base_model)
+        model_kwargs = {
+            "trust_remote_code": True,
+            "use_cache": False,
+        }
+        if not train_config.use_cpu:
+            model_kwargs["device_map"] = "auto"
+            model_kwargs["dtype"] = "auto"
+        model = AutoModelForCausalLM.from_pretrained(
+            train_config.base_model,
+            **model_kwargs,
+        )
         dataset = load_dataset("json", data_files=str(dataset_path), split="train")
 
         peft_config = None
@@ -71,9 +77,10 @@ class TrlSftTrainer(TrainerBackendBase):
                 lora_dropout=train_config.lora_dropout,
                 bias="none",
                 task_type="CAUSAL_LM",
+                target_modules=train_config.lora_target_modules,
             )
 
-        training_args = TrainingArguments(
+        training_args = SFTConfig(
             output_dir=str(artifact_dir),
             per_device_train_batch_size=train_config.per_device_train_batch_size,
             gradient_accumulation_steps=train_config.gradient_accumulation_steps,
@@ -82,6 +89,10 @@ class TrlSftTrainer(TrainerBackendBase):
             logging_steps=1,
             save_strategy="no",
             report_to="none",
+            gradient_checkpointing=train_config.gradient_checkpointing,
+            dataset_text_field="text",
+            max_length=train_config.max_length,
+            use_cpu=train_config.use_cpu,
         )
 
         trainer = SFTTrainer(
@@ -90,7 +101,6 @@ class TrlSftTrainer(TrainerBackendBase):
             train_dataset=dataset,
             processing_class=tokenizer,
             peft_config=peft_config,
-            max_seq_length=train_config.max_length,
         )
         trainer.train()
         trainer.save_model(str(artifact_dir))
