@@ -386,6 +386,9 @@ class MOEAD:
                 continue
 
     def _init_population(self):
+        if self._num_samplers <= 1:
+            self._thread_init_population()
+            return
         # threads for sampling
         sampler_threads = [
             Thread(
@@ -399,6 +402,9 @@ class MOEAD:
             t.join()
 
     def _do_sample(self):
+        if self._num_samplers <= 1:
+            self._thread_do_evolutionary_operator()
+            return
         sampler_threads = [
             Thread(
                 target=self._thread_do_evolutionary_operator,

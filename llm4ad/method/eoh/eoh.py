@@ -401,6 +401,9 @@ class EoH:
         """Execute `fn` using multithreading.
         In EoH, `fn` can be `self._iteratively_init_population` or `self._iteratively_use_eoh_operator`.
         """
+        if self._num_samplers <= 1:
+            fn(*args, **kwargs)
+            return
         # threads for sampling
         sampler_threads = [
             Thread(target=fn, args=args, kwargs=kwargs)

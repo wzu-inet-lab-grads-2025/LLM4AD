@@ -45,7 +45,7 @@ class LocalTransformersLLM(LLM):
             model_kwargs["device_map"] = device_map
         resolved_dtype = self._resolve_torch_dtype(torch_dtype)
         if resolved_dtype is not None:
-            model_kwargs["torch_dtype"] = resolved_dtype
+            model_kwargs["dtype"] = resolved_dtype
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             self._tokenizer_path,
