@@ -5,14 +5,14 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 from .augment import DedupAugmenter
-from .builders import OutcomeBuilder, PreferenceBuilder
+from .builders import OutcomeBuilder, PreferenceBuilder, VerifierBuilder
 from .collector import UnifiedCollector
-from .formatters import TrlChatFormatter, TrlPreferenceFormatter
+from .formatters import TrlChatFormatter, TrlPreferenceFormatter, VerifierJsonlFormatter
 from .gates import PromotionGate
 from .registry import ModelRegistry
 from .replay_buffer import ReplayBuffer
 from .schemas import DatasetManifest
-from .trainers import TrlDpoTrainer, TrlSftTrainer
+from .trainers import TrlDpoTrainer, TrlGrpoTrainer, TrlSftTrainer
 
 
 class PostTrainOrchestrator:
@@ -138,6 +138,25 @@ class PostTrainOrchestrator:
                 output_path=output_path,
                 config_digest="preference_v1",
             )
+        elif backend == "trl_grpo":
+            examples = VerifierBuilder().build(
+                records, config=self.config.builder, context=self.runtime.snapshot()
+            )
+            output_path = VerifierJsonlFormatter().format(
+                examples,
+                output_dir=datasets_dir,
+                dataset_name=f"round_{self.runtime.round_id:04d}_verifier",
+                context=self.runtime.snapshot(),
+            )
+            manifests["verifier"] = DatasetManifest(
+                round_id=self.runtime.round_id,
+                dataset_type="verifier",
+                source_runs=[self.runtime.run_id],
+                source_rounds=[self.runtime.round_id],
+                record_count=len(examples),
+                output_path=output_path,
+                config_digest="verifier_v1",
+            )
         else:
             raise ValueError(f"Unsupported trainer backend: {backend}")
 
@@ -154,8 +173,14 @@ class PostTrainOrchestrator:
         elif backend == "trl_dpo":
             manifest = dataset_manifests["preference"]
             trainer = TrlDpoTrainer()
+        elif backend == "trl_grpo":
+            manifest = dataset_manifests["verifier"]
+            trainer = TrlGrpoTrainer()
         else:
             raise ValueError(f"Unsupported trainer backend: {backend}")
+
+        if manifest.record_count == 0 or not manifest.output_path:
+            return None
 
         candidate = trainer.train(
             manifest.output_path,
