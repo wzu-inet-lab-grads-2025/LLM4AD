@@ -3,8 +3,22 @@ from __future__ import annotations
 
 class StaticValidationGate:
     def evaluate(
-        self, candidate, active, base, *, validation_spec=None, context=None
+        self,
+        candidate,
+        active,
+        base,
+        *,
+        validation_spec=None,
+        context=None,
+        enabled=True,
     ) -> dict:
+        if not enabled:
+            return {
+                "passed": True,
+                "details": {
+                    "reason": "Static validation gate is disabled by configuration.",
+                },
+            }
         if callable(validation_spec):
             result = validation_spec(
                 candidate=candidate, active=active, base=base, context=context
@@ -100,8 +114,15 @@ class SmokeSearchEvaluator:
 
 class SmokeSearchGate:
     def evaluate(
-        self, candidate, active, base, *, smoke_spec=None, context=None
+        self, candidate, active, base, *, smoke_spec=None, context=None, enabled=True
     ) -> dict:
+        if not enabled:
+            return {
+                "passed": True,
+                "details": {
+                    "reason": "Smoke-search gate is disabled by configuration.",
+                },
+            }
         if callable(smoke_spec):
             result = smoke_spec(
                 candidate=candidate, active=active, base=base, context=context
@@ -116,9 +137,10 @@ class SmokeSearchGate:
 
 
 class PromotionGate:
-    def __init__(self, static_gate=None, smoke_gate=None):
+    def __init__(self, static_gate=None, smoke_gate=None, config=None):
         self._static_gate = static_gate or StaticValidationGate()
         self._smoke_gate = smoke_gate or SmokeSearchGate()
+        self._config = config
 
     def evaluate(
         self,
@@ -136,6 +158,7 @@ class PromotionGate:
             base,
             validation_spec=validation_spec,
             context=context,
+            enabled=True if self._config is None else self._config.use_fixed_validation,
         )
         smoke_result = self._smoke_gate.evaluate(
             candidate,
@@ -143,6 +166,7 @@ class PromotionGate:
             base,
             smoke_spec=smoke_spec,
             context=context,
+            enabled=True if self._config is None else self._config.use_smoke_test,
         )
         return {
             "passed": static_result["passed"] and smoke_result["passed"],

@@ -42,7 +42,7 @@ class PostTrainOrchestrator:
         self.registry = registry or ModelRegistry(
             config.registry.artifact_root, workflow_key
         )
-        self.gate = gate or PromotionGate()
+        self.gate = gate or PromotionGate(config=config.gate)
         self.serve_manager = serve_manager
 
     def run_round(
