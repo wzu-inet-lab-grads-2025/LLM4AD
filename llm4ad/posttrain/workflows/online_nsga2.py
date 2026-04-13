@@ -41,7 +41,7 @@ def run_online_nsga2(
     event_store,
     resume_path=None,
 ):
-    workflow = NSGA2OnlineWorkflow(
+    workflow = build_online_nsga2_workflow(
         config=config,
         llm=llm,
         evaluation=evaluation,
@@ -51,3 +51,24 @@ def run_online_nsga2(
         event_store=event_store,
     )
     return workflow.run_search_round(resume_path=resume_path)
+
+
+def build_online_nsga2_workflow(
+    *,
+    config,
+    llm,
+    evaluation,
+    profiler=None,
+    method_kwargs=None,
+    runtime,
+    event_store,
+):
+    return NSGA2OnlineWorkflow(
+        config=config,
+        llm=llm,
+        evaluation=evaluation,
+        profiler=profiler,
+        method_kwargs=method_kwargs,
+        runtime=runtime,
+        event_store=event_store,
+    )

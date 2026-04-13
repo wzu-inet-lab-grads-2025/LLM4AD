@@ -96,7 +96,7 @@ def cmd_run_workflow(args):
     event_store = EventStore(event_root)
 
     method_kwargs = _load_json_arg(args.method_kwargs) or {}
-    workflow = workflow_fn(
+    workflow_or_result = workflow_fn(
         config=config,
         llm=llm,
         evaluation=evaluation,
@@ -104,17 +104,25 @@ def cmd_run_workflow(args):
         method_kwargs=method_kwargs,
         runtime=runtime,
         event_store=event_store,
-        resume_path=args.resume_path,
     )
 
     if args.use_orchestrator:
+        if not hasattr(workflow_or_result, "run_search_round"):
+            raise TypeError(
+                "When --use-orchestrator is set, --workflow-fn must resolve to a workflow builder that returns a workflow object."
+            )
         orchestrator = PostTrainOrchestrator(config, runtime, event_store)
         result = orchestrator.run_round(
-            workflow,
+            workflow_or_result,
             resume_path=args.resume_path,
         )
     else:
-        result = workflow.run_search_round(resume_path=args.resume_path)
+        if hasattr(workflow_or_result, "run_search_round"):
+            result = workflow_or_result.run_search_round(resume_path=args.resume_path)
+        elif hasattr(workflow_or_result, "run_collection"):
+            result = workflow_or_result.run_collection()
+        else:
+            result = workflow_or_result
 
     print(json.dumps(result, indent=2, ensure_ascii=True, default=str))
 

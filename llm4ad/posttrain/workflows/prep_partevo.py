@@ -47,7 +47,7 @@ class PartEvoPrepWorkflow(BaseWorkflow):
 def run_prep_partevo(
     *, config, llm, evaluation, profiler=None, method_kwargs=None, runtime, event_store
 ):
-    workflow = PartEvoPrepWorkflow(
+    workflow = build_prep_partevo_workflow(
         config=config,
         llm=llm,
         evaluation=evaluation,
@@ -57,3 +57,24 @@ def run_prep_partevo(
         event_store=event_store,
     )
     return workflow.run_collection()
+
+
+def build_prep_partevo_workflow(
+    *,
+    config,
+    llm,
+    evaluation,
+    profiler=None,
+    method_kwargs=None,
+    runtime,
+    event_store,
+):
+    return PartEvoPrepWorkflow(
+        config=config,
+        llm=llm,
+        evaluation=evaluation,
+        profiler=profiler,
+        method_kwargs=method_kwargs,
+        runtime=runtime,
+        event_store=event_store,
+    )
