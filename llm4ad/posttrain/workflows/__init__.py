@@ -22,7 +22,9 @@ _EXPORTS = {
     "run_online_moead": "llm4ad.posttrain.workflows.online_moead",
     "run_online_nsga2": "llm4ad.posttrain.workflows.online_nsga2",
     "run_online_reevo": "llm4ad.posttrain.workflows.online_reevo",
+    "run_prep_mles_and_build": "llm4ad.posttrain.workflows.prep_mles",
     "run_prep_mles": "llm4ad.posttrain.workflows.prep_mles",
+    "run_prep_partevo_and_build": "llm4ad.posttrain.workflows.prep_partevo",
     "run_prep_partevo": "llm4ad.posttrain.workflows.prep_partevo",
 }
 
