@@ -22,7 +22,7 @@ class PostTrainLLMProxy(LLM):
         self._inner_llm = inner_llm
         self._runtime = posttrain_runtime
         self._event_store = event_store
-        self._model_id = model_id or getattr(inner_llm, "model", None)
+        self._model_id = model_id or self._infer_model_id(inner_llm)
 
     def draw_sample(self, prompt: str | Any, *args, **kwargs) -> str:
         sample_id = self._runtime.begin_sample()
@@ -73,3 +73,12 @@ class PostTrainLLMProxy(LLM):
             model_id=self._model_id,
             sampling_kwargs=sampling_kwargs,
         )
+
+    def _infer_model_id(self, inner_llm: LLM) -> str:
+        for attr in ("_model", "_model_path", "model_name", "model"):
+            value = getattr(inner_llm, attr, None)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                return value
+        return inner_llm.__class__.__name__

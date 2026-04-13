@@ -90,7 +90,8 @@ class LocalTransformersLLM(LLM):
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
     def close(self):
-        del self.model
+        if hasattr(self, "model"):
+            del self.model
         if self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()
 

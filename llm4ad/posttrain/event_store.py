@@ -29,6 +29,7 @@ class EventStore:
         )
         event_file = self.root_dir / self._event_type_to_file(event_type)
         payload = asdict(event) if is_dataclass(event) else dict(event)
+        payload = self._make_jsonable(payload)
         with event_file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
@@ -62,3 +63,12 @@ class EventStore:
 
     def _event_type_to_file(self, event_type: str) -> str:
         return self._EVENT_FILE_MAP.get(event_type, f"{event_type}.jsonl")
+
+    def _make_jsonable(self, value):
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, dict):
+            return {str(key): self._make_jsonable(val) for key, val in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [self._make_jsonable(item) for item in value]
+        return str(value)
