@@ -1,0 +1,10 @@
+workflow:
+  workflow_name: prep_mles
+  task_name: replace_me
+  method_name: MLES
+
+trainer:
+  backend: trl_sft
+
+builder:
+  include_init_phase: true

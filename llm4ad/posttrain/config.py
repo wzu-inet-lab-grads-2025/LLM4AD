@@ -73,6 +73,10 @@ class GateConfig:
     use_fixed_validation: bool = True
     use_smoke_test: bool = True
     smoke_compare_lines: tuple[str, ...] = ("candidate", "active", "base")
+    smoke_max_samples: int = 20
+    smoke_max_generations: int | None = None
+    min_candidate_margin: float = 0.0
+    maximize_metric: bool = True
     allow_auto_split_validation: bool = True
     validation_split_seed: int = 42
 
@@ -89,6 +93,9 @@ class ServeConfig:
     backend: Literal["vllm"] = "vllm"
     openai_compatible: bool = True
     switch_only_at_round_end: bool = True
+    tokenizer_path: str | None = None
+    gpus: tuple[int, ...] = ()
+    ports: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)

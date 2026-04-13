@@ -1,0 +1,4 @@
+synthesize:
+  enabled: true
+  allow_teacher_local_or_remote: true
+  record_provenance: true

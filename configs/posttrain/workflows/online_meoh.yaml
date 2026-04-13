@@ -1,0 +1,10 @@
+workflow:
+  workflow_name: online_meoh
+  task_name: replace_me
+  method_name: MEoH
+
+trainer:
+  backend: trl_sft
+
+round:
+  max_samples_per_round: 20

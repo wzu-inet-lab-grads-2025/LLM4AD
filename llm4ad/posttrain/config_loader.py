@@ -78,11 +78,11 @@ def _instantiate_dataclass(cls, data: dict[str, Any]):
 
 def _normalize_paths(data: dict[str, Any], base_dir: Path) -> dict[str, Any]:
     normalized = dict(data)
-    for section in ("registry", "event_store"):
+    for section in ("registry", "event_store", "trainer", "serve"):
         section_data = normalized.get(section)
         if not isinstance(section_data, dict):
             continue
-        for key in ("artifact_root", "root_subdir"):
+        for key in ("artifact_root", "root_subdir", "output_root", "tokenizer_path"):
             if (
                 key in section_data
                 and section_data[key]
@@ -90,6 +90,22 @@ def _normalize_paths(data: dict[str, Any], base_dir: Path) -> dict[str, Any]:
             ):
                 section_data[key] = str((base_dir / section_data[key]).resolve())
     return normalized
+
+
+def build_posttrain_config(
+    raw_data: dict[str, Any], *, base_dir: str | Path | None = None
+) -> PostTrainConfig:
+    base_path = Path(base_dir).resolve() if base_dir is not None else Path.cwd()
+    raw_data = _normalize_paths(raw_data, base_path)
+    kwargs = {}
+    for name, cls in _CONFIG_TYPES.items():
+        section_data = raw_data.get(name)
+        if section_data is None:
+            continue
+        kwargs[name] = _instantiate_dataclass(cls, section_data)
+    if "workflow" not in kwargs:
+        raise ValueError("Posttrain config must include a workflow section.")
+    return PostTrainConfig(**kwargs)
 
 
 def load_posttrain_config(path: str | Path) -> PostTrainConfig:
@@ -104,13 +120,4 @@ def load_posttrain_config(path: str | Path) -> PostTrainConfig:
     else:
         raise ValueError(f"Unsupported posttrain config suffix: {suffix}")
 
-    raw_data = _normalize_paths(raw_data, config_path.parent)
-    kwargs = {}
-    for name, cls in _CONFIG_TYPES.items():
-        section_data = raw_data.get(name)
-        if section_data is None:
-            continue
-        kwargs[name] = _instantiate_dataclass(cls, section_data)
-    if "workflow" not in kwargs:
-        raise ValueError("Posttrain config must include a workflow section.")
-    return PostTrainConfig(**kwargs)
+    return build_posttrain_config(raw_data, base_dir=config_path.parent)

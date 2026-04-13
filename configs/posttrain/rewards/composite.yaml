@@ -1,0 +1,5 @@
+reward:
+  provider: local_eval
+  shapers:
+    - normalize
+    - margin

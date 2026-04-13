@@ -1,0 +1,4 @@
+trainer:
+  backend: trl_sft
+  output_adapter_only: true
+  execution_mode: python

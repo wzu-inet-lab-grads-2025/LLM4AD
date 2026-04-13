@@ -1,0 +1,88 @@
+workflow:
+  workflow_name: online_eoh
+  task_name: replace_me
+  method_name: EoH
+  experiment_name:
+
+round:
+  max_samples_per_round: 20
+  max_generations_per_round:
+  stop_granularity: sample
+  rebuild_method_between_rounds: true
+  allow_same_process_resume: true
+
+event_store:
+  enabled: true
+  root_subdir: posttrain/events
+  split_by_event_type: true
+
+collector:
+  include_history_logs: true
+  include_event_store: true
+  output_as: records
+
+replay_buffer:
+  enabled: true
+  recent_capacity: 5000
+  elite_capacity: 1000
+  diversity_capacity: 2000
+
+builder:
+  include_init_phase: false
+  dedup: true
+  synthetic_ratio: 0.1
+  synthetic_mode: mixed
+
+reward:
+  provider: local_eval
+  shapers:
+    - normalize
+  allow_external_provider: true
+
+trainer:
+  backend: trl_sft
+  base_model: replace_me
+  output_adapter_only: true
+  execution_mode: python
+  output_root: artifacts/posttrain/training
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 1
+  num_train_epochs: 1.0
+  learning_rate: 1.0e-5
+  max_length: 2048
+  max_prompt_length: 1024
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
+gate:
+  use_fixed_validation: true
+  use_smoke_test: true
+  smoke_compare_lines:
+    - candidate
+    - active
+    - base
+  smoke_max_samples: 20
+  smoke_max_generations:
+  min_candidate_margin: 0.0
+  maximize_metric: true
+  allow_auto_split_validation: true
+  validation_split_seed: 42
+
+registry:
+  artifact_root: artifacts/posttrain
+  version_naming: round_timestamp
+  keep_previous: true
+
+serve:
+  backend: vllm
+  openai_compatible: true
+  switch_only_at_round_end: true
+  tokenizer_path:
+  gpus: []
+  ports: []
+
+synthesize:
+  enabled: false
+  allow_teacher_local_or_remote: true
+  record_provenance: true

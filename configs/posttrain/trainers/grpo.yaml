@@ -1,0 +1,4 @@
+trainer:
+  backend: trl_grpo
+  output_adapter_only: true
+  execution_mode: python

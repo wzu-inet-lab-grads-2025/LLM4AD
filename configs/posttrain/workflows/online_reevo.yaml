@@ -1,0 +1,10 @@
+workflow:
+  workflow_name: online_reevo
+  task_name: replace_me
+  method_name: ReEvo
+
+trainer:
+  backend: trl_sft
+
+round:
+  max_samples_per_round: 20

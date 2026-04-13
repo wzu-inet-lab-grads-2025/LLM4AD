@@ -18,6 +18,7 @@ from .collector import UnifiedCollector
 from .eval_trace import EvalTraceRecorder
 from .event_store import EventStore
 from .gates import PromotionGate, SmokeSearchGate, StaticValidationGate
+from .hydra_adapter import load_posttrain_config_from_hydra
 from .llm_proxy import PostTrainLLMProxy
 from .orchestrator import PostTrainOrchestrator
 from .registry import ModelRegistry
@@ -46,6 +47,7 @@ __all__ = [
     "ServeManagerBase",
     "VLLMServeManager",
     "load_posttrain_config",
+    "load_posttrain_config_from_hydra",
     "PostTrainConfig",
     "PostTrainLLMProxy",
     "PostTrainRuntime",
