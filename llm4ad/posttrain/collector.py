@@ -21,10 +21,14 @@ class UnifiedCollector:
     ) -> list[SampleRecord]:
         records: list[SampleRecord] = []
         if self._config.include_event_store:
-            for payload in event_store.iter_events(
-                "SampleRecord", run_id=run_id, round_id=round_id
-            ):
-                records.append(SampleRecord(**payload))
+            records.extend(
+                self._read_event_store(
+                    event_store=event_store,
+                    run_id=run_id,
+                    round_id=round_id,
+                    method_name=method_name,
+                )
+            )
 
         if self._config.include_history_logs and log_dir:
             history_records = self._read_history_log_dir(
@@ -50,6 +54,73 @@ class UnifiedCollector:
             )
             all_records.extend(records)
         return all_records
+
+    def _read_event_store(
+        self,
+        *,
+        event_store,
+        run_id: str,
+        round_id: int,
+        method_name: str,
+    ) -> list[SampleRecord]:
+        request_by_sample = {
+            payload["sample_id"]: payload
+            for payload in event_store.iter_events(
+                "LLMRequestEvent", run_id=run_id, round_id=round_id
+            )
+        }
+        response_by_sample = {
+            payload["sample_id"]: payload
+            for payload in event_store.iter_events(
+                "LLMResponseEvent", run_id=run_id, round_id=round_id
+            )
+        }
+        parse_by_sample = {
+            payload["sample_id"]: payload
+            for payload in event_store.iter_events(
+                "ParseEvent", run_id=run_id, round_id=round_id
+            )
+        }
+        eval_by_sample = {
+            payload["sample_id"]: payload
+            for payload in event_store.iter_events(
+                "EvalTraceRecord", run_id=run_id, round_id=round_id
+            )
+        }
+
+        sample_records: dict[str, SampleRecord] = {}
+        for payload in event_store.iter_events(
+            "SampleRecord", run_id=run_id, round_id=round_id
+        ):
+            record = SampleRecord(**payload)
+            sample_records[record.sample_id] = self._enrich_sample_record(
+                record,
+                request_by_sample=request_by_sample,
+                response_by_sample=response_by_sample,
+                parse_by_sample=parse_by_sample,
+                eval_by_sample=eval_by_sample,
+            )
+
+        event_only_sample_ids = (
+            set(request_by_sample)
+            | set(response_by_sample)
+            | set(parse_by_sample)
+            | set(eval_by_sample)
+        ) - set(sample_records)
+
+        for sample_id in sorted(event_only_sample_ids):
+            sample_records[sample_id] = self._build_event_only_record(
+                sample_id=sample_id,
+                run_id=run_id,
+                round_id=round_id,
+                method_name=method_name,
+                request_payload=request_by_sample.get(sample_id),
+                response_payload=response_by_sample.get(sample_id),
+                parse_payload=parse_by_sample.get(sample_id),
+                eval_payload=eval_by_sample.get(sample_id),
+            )
+
+        return list(sample_records.values())
 
     def _read_history_log_dir(
         self,
@@ -116,3 +187,90 @@ class UnifiedCollector:
             merged.append(record)
             seen.add(key)
         return merged
+
+    def _enrich_sample_record(
+        self,
+        record: SampleRecord,
+        *,
+        request_by_sample: dict,
+        response_by_sample: dict,
+        parse_by_sample: dict,
+        eval_by_sample: dict,
+    ) -> SampleRecord:
+        request_payload = request_by_sample.get(record.sample_id)
+        response_payload = response_by_sample.get(record.sample_id)
+        parse_payload = parse_by_sample.get(record.sample_id)
+        eval_payload = eval_by_sample.get(record.sample_id)
+
+        provenance = dict(record.provenance or {})
+        if request_payload is not None:
+            provenance["llm_request"] = request_payload
+            if record.prompt is None:
+                record.prompt = request_payload.get("prompt")
+            if record.messages is None:
+                record.messages = request_payload.get("messages")
+            if record.phase is None:
+                record.phase = request_payload.get("phase", record.phase)
+        if response_payload is not None:
+            provenance["llm_response"] = response_payload
+            if record.response is None:
+                record.response = response_payload.get("raw_response")
+        if parse_payload is not None:
+            provenance["parse_event"] = parse_payload
+        if eval_payload is not None:
+            provenance["eval_trace"] = eval_payload
+            if record.eval_time is None:
+                record.eval_time = eval_payload.get("eval_time")
+            if record.score is None:
+                record.score = eval_payload.get("score")
+        record.provenance = provenance
+        return record
+
+    def _build_event_only_record(
+        self,
+        *,
+        sample_id: str,
+        run_id: str,
+        round_id: int,
+        method_name: str,
+        request_payload: dict | None,
+        response_payload: dict | None,
+        parse_payload: dict | None,
+        eval_payload: dict | None,
+    ) -> SampleRecord:
+        provenance = {"source": "event_only"}
+        if request_payload is not None:
+            provenance["llm_request"] = request_payload
+        if response_payload is not None:
+            provenance["llm_response"] = response_payload
+        if parse_payload is not None:
+            provenance["parse_event"] = parse_payload
+        if eval_payload is not None:
+            provenance["eval_trace"] = eval_payload
+
+        return SampleRecord(
+            run_id=run_id,
+            round_id=round_id,
+            sample_id=sample_id,
+            method_name=method_name,
+            phase="search"
+            if request_payload is None
+            else request_payload.get("phase", "search"),
+            operator=None,
+            parents=None,
+            generation=None,
+            prompt=None if request_payload is None else request_payload.get("prompt"),
+            messages=None
+            if request_payload is None
+            else request_payload.get("messages"),
+            response=None
+            if response_payload is None
+            else response_payload.get("raw_response"),
+            function=None,
+            program=None,
+            algorithm=None,
+            score=None if eval_payload is None else eval_payload.get("score"),
+            sample_time=None,
+            eval_time=None if eval_payload is None else eval_payload.get("eval_time"),
+            provenance=provenance,
+        )
