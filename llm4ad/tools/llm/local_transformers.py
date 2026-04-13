@@ -10,6 +10,7 @@ class LocalTransformersLLM(LLM):
         self,
         model_path: str,
         *,
+        adapter_path: str | None = None,
         tokenizer_path: str | None = None,
         device_map: str | dict | None = "auto",
         torch_dtype: str | None = "auto",
@@ -31,6 +32,7 @@ class LocalTransformersLLM(LLM):
 
         self._torch = torch
         self._model_path = model_path
+        self._adapter_path = adapter_path
         self._tokenizer_path = tokenizer_path or model_path
         self._max_new_tokens = max_new_tokens
         self._temperature = temperature
@@ -60,6 +62,14 @@ class LocalTransformersLLM(LLM):
         )
         if "device_map" not in model_kwargs and self._device is not None:
             self.model.to(self._device)
+        if self._adapter_path is not None:
+            try:
+                from peft import PeftModel
+            except ImportError as exc:  # pragma: no cover
+                raise ImportError(
+                    "Loading adapter_path requires peft. Install requirements-posttrain.txt in the virtual environment."
+                ) from exc
+            self.model = PeftModel.from_pretrained(self.model, self._adapter_path)
         self.model.eval()
 
     def draw_sample(self, prompt: str | Any, *args, **kwargs) -> str:

@@ -78,10 +78,20 @@ class ToyPriorityEvaluation(Evaluation):
 
 
 def build_local_llm(
-    *, model_ref=None, line_name=None, config=None, base_llm=None, context=None
+    *,
+    model_ref=None,
+    line_name=None,
+    config=None,
+    base_llm=None,
+    context=None,
+    max_new_tokens=64,
 ):
     model_path = config.trainer.base_model if config is not None else None
+    adapter_path = None
     if isinstance(model_ref, dict):
+        if model_ref.get("artifact_type") == "adapter" and model_ref.get("path"):
+            adapter_path = model_ref["path"]
+            model_path = model_ref.get("base_model", model_path)
         candidate_path = model_ref.get("path")
         if candidate_path and (Path(candidate_path) / "config.json").exists():
             model_path = candidate_path
@@ -90,7 +100,8 @@ def build_local_llm(
 
     return LocalTransformersLLM(
         model_path=model_path,
-        max_new_tokens=64,
+        adapter_path=adapter_path,
+        max_new_tokens=max_new_tokens,
         temperature=0.0,
         top_p=1.0,
     )
@@ -102,12 +113,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--disable-smoke", action="store_true")
     parser.add_argument("--smoke-max-samples", type=int, default=1)
+    parser.add_argument(
+        "--smoke-lines",
+        nargs="+",
+        default=["candidate", "active", "base"],
+        choices=["candidate", "active", "base"],
+    )
+    parser.add_argument(
+        "--trainer-backend",
+        choices=["dryrun", "trl_sft"],
+        default="dryrun",
+    )
+    parser.add_argument("--llm-max-new-tokens", type=int, default=48)
     args = parser.parse_args()
 
     model_path = "models/Qwen2.5-Coder-1.5B-Instruct"
     llm = LocalTransformersLLM(
         model_path=model_path,
-        max_new_tokens=48,
+        max_new_tokens=args.llm_max_new_tokens,
         temperature=0.0,
         top_p=1.0,
     )
@@ -120,8 +143,21 @@ def main():
             experiment_name="local_qwen_toy_orchestrator_demo",
         ),
         trainer=TrainerConfig(
-            backend="dryrun",
+            backend=args.trainer_backend,
             base_model=model_path,
+            output_root="artifacts/posttrain/training_local_toy",
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=1,
+            num_train_epochs=1.0,
+            learning_rate=1e-5,
+            max_length=256,
+            max_prompt_length=128,
+            lora_r=8,
+            lora_alpha=16,
+            lora_dropout=0.05,
+            gradient_checkpointing=True,
+            use_cpu=False,
+            lora_target_modules="all-linear",
         ),
         builder=BuilderConfig(
             include_init_phase=True,
@@ -129,9 +165,22 @@ def main():
         gate=GateConfig(
             use_fixed_validation=False,
             use_smoke_test=not args.disable_smoke,
+            smoke_compare_lines=tuple(args.smoke_lines),
             smoke_max_samples=args.smoke_max_samples,
         ),
     )
+
+    def local_llm_builder(
+        *, model_ref=None, line_name=None, config=None, base_llm=None, context=None
+    ):
+        return build_local_llm(
+            model_ref=model_ref,
+            line_name=line_name,
+            config=config,
+            base_llm=base_llm,
+            context=context,
+            max_new_tokens=args.llm_max_new_tokens,
+        )
 
     runtime = PostTrainRuntime(
         config,
@@ -157,7 +206,7 @@ def main():
         },
         runtime=runtime,
         event_store=event_store,
-        llm_builder=build_local_llm,
+        llm_builder=local_llm_builder,
     )
 
     try:
