@@ -16,6 +16,9 @@ class BestScoreExtractor:
     ):
         log_dir = None if search_report is None else search_report.get("log_dir")
         if not log_dir:
+            event_score = self._extract_from_event_store(workflow)
+            if event_score is not None:
+                return {"score": event_score, "source": "event_store"}
             return {"score": None, "reason": "log_dir unavailable"}
 
         best_path = Path(log_dir) / "samples" / "samples_best.json"
@@ -46,6 +49,36 @@ class BestScoreExtractor:
                     if best_score is None or score > best_score:
                         best_score = score
         return {"score": best_score, "source": str(samples_dir)}
+
+    def _extract_from_event_store(self, workflow):
+        if (
+            workflow is None
+            or not hasattr(workflow, "event_store")
+            or not hasattr(workflow, "runtime")
+        ):
+            return None
+        run_id = workflow.runtime.run_id
+        round_id = workflow.runtime.round_id
+        best_score = None
+        for payload in workflow.event_store.iter_events(
+            "EvalTraceRecord", run_id=run_id, round_id=round_id
+        ):
+            score = payload.get("score")
+            if not isinstance(score, (int, float)):
+                continue
+            if best_score is None or score > best_score:
+                best_score = score
+        if best_score is not None:
+            return best_score
+        for payload in workflow.event_store.iter_events(
+            "SampleRecord", run_id=run_id, round_id=round_id
+        ):
+            score = payload.get("score")
+            if not isinstance(score, (int, float)):
+                continue
+            if best_score is None or score > best_score:
+                best_score = score
+        return best_score
 
 
 class WorkflowSmokeRunner:

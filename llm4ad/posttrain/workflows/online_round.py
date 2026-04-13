@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 from .base import BaseWorkflow
 
 
@@ -16,7 +18,12 @@ class OnlineRoundWorkflow(BaseWorkflow):
         method = self.build_method(wrapped_llm, self.evaluation, profiler, adapter)
 
         if resume_path is not None:
-            self.get_resume_fn()(method, resume_path)
+            resume_fn = self.get_resume_fn()
+            param_num = len(inspect.signature(resume_fn).parameters)
+            if param_num >= 2:
+                resume_fn(method, resume_path)
+            else:
+                resume_fn(method)
 
         adapter.bind(method, self.runtime, self.event_store)
 

@@ -108,7 +108,7 @@ class BaseWorkflow:
             llm=llm,
             evaluation=self.evaluation,
             profiler=smoke_profiler,
-            method_kwargs=self.method_kwargs,
+            method_kwargs=self._build_smoke_method_kwargs(),
             runtime=smoke_runtime,
             event_store=smoke_event_store,
             llm_builder=self.llm_builder,
@@ -127,3 +127,15 @@ class BaseWorkflow:
         )
         base_dir.mkdir(parents=True, exist_ok=True)
         return base_dir
+
+    def _build_smoke_method_kwargs(self):
+        smoke_kwargs = dict(self.method_kwargs)
+        smoke_max_samples = getattr(self.config.gate, "smoke_max_samples", None)
+        smoke_max_generations = getattr(self.config.gate, "smoke_max_generations", None)
+
+        if smoke_max_samples is not None:
+            smoke_kwargs["max_sample_nums"] = smoke_max_samples
+        if smoke_max_generations is not None:
+            smoke_kwargs["max_generations"] = smoke_max_generations
+
+        return smoke_kwargs
