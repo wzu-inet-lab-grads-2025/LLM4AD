@@ -32,9 +32,9 @@ class OnlineRoundWorkflow(BaseWorkflow):
         return method
 
     def run_search_round(self, *, resume_path: str | None = None):
-        method = self.build_or_resume_method(resume_path=resume_path)
         self.runtime.begin_round("search")
         try:
+            method = self.build_or_resume_method(resume_path=resume_path)
             method.run()
         finally:
             self.runtime.end_round()

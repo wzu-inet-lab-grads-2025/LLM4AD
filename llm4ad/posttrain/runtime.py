@@ -63,7 +63,19 @@ class PostTrainRuntime:
 
     def begin_round(self, phase: str = "search") -> RunContext:
         round_id = self.next_round()
-        ctx = replace(self._base_context, round_id=round_id, phase=phase)
+        ctx = replace(
+            self._base_context,
+            round_id=round_id,
+            phase=phase,
+            sample_id=None,
+            operator=None,
+            parents=None,
+            generation=None,
+            cluster_id=None,
+            thread_id=None,
+            extra={},
+        )
+        self._base_context = ctx
         self._set_context(ctx)
         return self.snapshot()
 

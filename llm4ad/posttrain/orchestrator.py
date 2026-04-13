@@ -12,7 +12,7 @@ from .gates import PromotionGate
 from .registry import ModelRegistry
 from .replay_buffer import ReplayBuffer
 from .schemas import DatasetManifest
-from .trainers import TrlDpoTrainer, TrlGrpoTrainer, TrlSftTrainer
+from .trainers import DryRunTrainer, TrlDpoTrainer, TrlGrpoTrainer, TrlSftTrainer
 
 
 class PostTrainOrchestrator:
@@ -105,7 +105,7 @@ class PostTrainOrchestrator:
         backend = self.config.trainer.backend
         manifests = {}
 
-        if backend == "trl_sft":
+        if backend in {"dryrun", "trl_sft"}:
             examples = OutcomeBuilder().build(
                 records, config=self.config.builder, context=self.runtime.snapshot()
             )
@@ -172,7 +172,10 @@ class PostTrainOrchestrator:
             return None
         backend = self.config.trainer.backend
         model_spec = {"round_id": self.runtime.round_id}
-        if backend == "trl_sft":
+        if backend == "dryrun":
+            manifest = dataset_manifests["outcome"]
+            trainer = DryRunTrainer()
+        elif backend == "trl_sft":
             manifest = dataset_manifests["outcome"]
             trainer = TrlSftTrainer()
         elif backend == "trl_dpo":

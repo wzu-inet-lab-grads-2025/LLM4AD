@@ -52,7 +52,7 @@ class RewardConfig:
 
 @dataclass(slots=True)
 class TrainerConfig:
-    backend: Literal["trl_sft", "trl_dpo", "trl_grpo"] = "trl_sft"
+    backend: Literal["dryrun", "trl_sft", "trl_dpo", "trl_grpo"] = "trl_sft"
     base_model: str = ""
     output_adapter_only: bool = True
     execution_mode: Literal["python", "subprocess"] = "python"
