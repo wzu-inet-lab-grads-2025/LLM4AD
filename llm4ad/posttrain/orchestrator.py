@@ -43,7 +43,7 @@ class PostTrainOrchestrator:
             config.registry.artifact_root, workflow_key
         )
         self.gate = gate or PromotionGate(config=config.gate)
-        self.serve_manager = serve_manager
+        self.serve_manager = serve_manager or self._build_default_serve_manager()
 
     def run_round(
         self,
@@ -199,6 +199,22 @@ class PostTrainOrchestrator:
         if self.serve_manager is not None:
             self.serve_manager.switch(promotion.candidate_version)
         return promotion
+
+    def _build_default_serve_manager(self):
+        serve_cfg = self.config.serve
+        if serve_cfg.backend != "vllm":
+            return None
+        if not serve_cfg.gpus or not serve_cfg.ports:
+            return None
+        from .serve.model_router import RegistryModelRouter
+        from .serve.vllm_manager import VLLMServeManager
+
+        return VLLMServeManager(
+            RegistryModelRouter(self.registry),
+            tokenizer_path=serve_cfg.tokenizer_path,
+            gpus=list(serve_cfg.gpus),
+            ports=list(serve_cfg.ports),
+        )
 
     def write_round_manifest(self, report: dict, *, log_dir: str | None):
         rounds_dir = self._get_rounds_dir(log_dir)
