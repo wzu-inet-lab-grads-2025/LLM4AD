@@ -26,10 +26,12 @@ from .replay_buffer import ReplayBuffer
 from .rewards import CompositeReward, RewardProviderBase, RewardShaperBase
 from .runtime import PostTrainRuntime
 from .serve import RegistryModelRouter, ServeManagerBase, VLLMServeManager
+from .smoke import BestScoreExtractor, WorkflowSmokeRunner
 from .synthesize import SynthesizeStrategyBase
 
 __all__ = [
     "BuilderConfig",
+    "BestScoreExtractor",
     "CollectorConfig",
     "CompositeReward",
     "EvalTraceRecorder",
@@ -46,6 +48,7 @@ __all__ = [
     "UnifiedCollector",
     "ServeManagerBase",
     "VLLMServeManager",
+    "WorkflowSmokeRunner",
     "load_posttrain_config",
     "load_posttrain_config_from_hydra",
     "PostTrainConfig",
