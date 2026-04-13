@@ -9,9 +9,9 @@ class EvalTraceRecorder:
         self._event_store = event_store
 
     def record_parse_failure(
-        self, *, error_type: str, error_message: str | None = None
+        self, *, error_type: str, error_message: str | None = None, context=None
     ) -> None:
-        ctx = self._runtime.snapshot()
+        ctx = self._resolve_context(context)
         self._event_store.append(
             ParseEvent(
                 run_id=ctx.run_id,
@@ -25,9 +25,9 @@ class EvalTraceRecorder:
         )
 
     def record_program_failure(
-        self, *, error_type: str, error_message: str | None = None
+        self, *, error_type: str, error_message: str | None = None, context=None
     ) -> None:
-        ctx = self._runtime.snapshot()
+        ctx = self._resolve_context(context)
         self._event_store.append(
             ParseEvent(
                 run_id=ctx.run_id,
@@ -46,6 +46,7 @@ class EvalTraceRecorder:
         eval_time: float | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
+        context=None,
     ) -> None:
         self.record_eval_result(
             score=None,
@@ -55,6 +56,7 @@ class EvalTraceRecorder:
             timeout=False,
             error_type=error_type,
             error_message=error_message,
+            context=context,
         )
 
     def record_evaluator_failure(
@@ -63,6 +65,7 @@ class EvalTraceRecorder:
         eval_time: float | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
+        context=None,
     ) -> None:
         self.record_eval_result(
             score=None,
@@ -72,10 +75,15 @@ class EvalTraceRecorder:
             timeout=False,
             error_type=error_type,
             error_message=error_message,
+            context=context,
         )
 
     def record_timeout(
-        self, *, eval_time: float | None = None, error_message: str | None = None
+        self,
+        *,
+        eval_time: float | None = None,
+        error_message: str | None = None,
+        context=None,
     ) -> None:
         self.record_eval_result(
             score=None,
@@ -85,6 +93,7 @@ class EvalTraceRecorder:
             timeout=True,
             error_type="TimeoutError",
             error_message=error_message,
+            context=context,
         )
 
     def record_eval_result(
@@ -98,8 +107,9 @@ class EvalTraceRecorder:
         error_type: str | None,
         error_message: str | None,
         score_breakdown: dict | None = None,
+        context=None,
     ) -> None:
-        ctx = self._runtime.snapshot()
+        ctx = self._resolve_context(context)
         self._event_store.append(
             EvalTraceRecord(
                 run_id=ctx.run_id,
@@ -115,3 +125,8 @@ class EvalTraceRecorder:
                 score_breakdown=score_breakdown,
             )
         )
+
+    def _resolve_context(self, context=None):
+        if context is not None:
+            return context
+        return self._runtime.snapshot()

@@ -218,8 +218,15 @@ class EoH:
                 )
             return
         # evaluate
+        posttrain_context = (
+            None
+            if self._posttrain_runtime is None
+            else self._posttrain_runtime.snapshot()
+        )
         score, eval_time = self._evaluation_executor.submit(
-            self._evaluator.evaluate_program_record_time, program
+            self._evaluator.evaluate_program_record_time,
+            program,
+            posttrain_context=posttrain_context,
         ).result()
         # register to profiler
         func.score = score

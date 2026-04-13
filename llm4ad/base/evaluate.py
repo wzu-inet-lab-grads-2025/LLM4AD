@@ -179,6 +179,7 @@ class SecureEvaluator:
         return program_str
 
     def evaluate_program(self, program: str | Program, **kwargs):
+        posttrain_context = kwargs.pop("posttrain_context", None)
         try:
             program_str = str(program)
             function_name = TextFunctionProgramConverter.text_to_function(
@@ -186,7 +187,9 @@ class SecureEvaluator:
             ).name
             program_str = self._modify_program_code(program_str)
         except Exception as e:
-            self._record_parse_failure(type(e).__name__, str(e))
+            self._record_parse_failure(
+                type(e).__name__, str(e), context=posttrain_context
+            )
             if self._debug_mode:
                 print("DEBUG: Exception occurred in evaluate_program:")
                 traceback.print_exc()
@@ -223,7 +226,9 @@ class SecureEvaluator:
                     if process.is_alive():
                         process.kill()
                         process.join()
-                    self._record_timeout(self._evaluator.timeout_seconds)
+                    self._record_timeout(
+                        self._evaluator.timeout_seconds, context=posttrain_context
+                    )
                     return None
             else:
                 payload = result_queue.get()
@@ -232,10 +237,10 @@ class SecureEvaluator:
                 if process.is_alive():
                     process.kill()
                     process.join()
-            return self._handle_payload(payload)
+            return self._handle_payload(payload, context=posttrain_context)
 
         payload = self._evaluate_payload(program_str, function_name, **kwargs)
-        return self._handle_payload(payload)
+        return self._handle_payload(payload, context=posttrain_context)
 
     def evaluate_program_record_time(self, program: str | Program, **kwargs):
         evaluate_start = time.time()
@@ -290,10 +295,11 @@ class SecureEvaluator:
             }
 
     def _evaluate(self, program_str: str, function_name, **kwargs):
+        posttrain_context = kwargs.pop("posttrain_context", None)
         payload = self._evaluate_payload(program_str, function_name, **kwargs)
-        return self._handle_payload(payload)
+        return self._handle_payload(payload, context=posttrain_context)
 
-    def _handle_payload(self, payload):
+    def _handle_payload(self, payload, *, context=None):
         if payload is None:
             return None
         if payload.get("ok"):
@@ -305,52 +311,62 @@ class SecureEvaluator:
                 timeout=False,
                 error_type=None,
                 error_message=None,
+                context=context,
             )
             return result
 
         stage = payload.get("stage")
         if stage == "exec":
             self._record_exec_failure(
-                payload.get("error_type"), payload.get("error_message")
+                payload.get("error_type"), payload.get("error_message"), context=context
             )
         else:
             self._record_evaluator_failure(
-                payload.get("error_type"), payload.get("error_message")
+                payload.get("error_type"), payload.get("error_message"), context=context
             )
         if self._debug_mode:
             print("DEBUG: Exception occurred in evaluate_program:")
             print(payload.get("error_message"))
         return None
 
-    def _record_parse_failure(self, error_type: str, error_message: str | None = None):
+    def _record_parse_failure(
+        self, error_type: str, error_message: str | None = None, *, context=None
+    ):
         if self._eval_trace_recorder is not None:
             self._eval_trace_recorder.record_parse_failure(
                 error_type=error_type,
                 error_message=error_message,
+                context=context,
             )
 
-    def _record_exec_failure(self, error_type: str | None, error_message: str | None):
+    def _record_exec_failure(
+        self, error_type: str | None, error_message: str | None, *, context=None
+    ):
         if self._eval_trace_recorder is not None:
             self._eval_trace_recorder.record_exec_failure(
                 error_type=error_type,
                 error_message=error_message,
+                context=context,
             )
 
     def _record_evaluator_failure(
-        self, error_type: str | None, error_message: str | None
+        self, error_type: str | None, error_message: str | None, *, context=None
     ):
         if self._eval_trace_recorder is not None:
             self._eval_trace_recorder.record_evaluator_failure(
                 error_type=error_type,
                 error_message=error_message,
+                context=context,
             )
 
-    def _record_timeout(self, timeout_seconds: int | float | None):
+    def _record_timeout(self, timeout_seconds: int | float | None, *, context=None):
         if self._eval_trace_recorder is not None:
             message = None
             if timeout_seconds is not None:
                 message = f"Evaluation exceeded timeout of {timeout_seconds} seconds."
-            self._eval_trace_recorder.record_timeout(error_message=message)
+            self._eval_trace_recorder.record_timeout(
+                error_message=message, context=context
+            )
 
     def _record_eval_result(
         self,
@@ -361,6 +377,7 @@ class SecureEvaluator:
         timeout: bool,
         error_type: str | None,
         error_message: str | None,
+        context=None,
     ):
         if self._eval_trace_recorder is not None:
             score_breakdown = score if isinstance(score, dict) else None
@@ -373,4 +390,5 @@ class SecureEvaluator:
                 error_type=error_type,
                 error_message=error_message,
                 score_breakdown=score_breakdown,
+                context=context,
             )

@@ -341,8 +341,15 @@ class PartEvo:
             return
 
         # Synchronously wait for parallel evaluation result
+        posttrain_context = (
+            None
+            if self._posttrain_runtime is None
+            else self._posttrain_runtime.snapshot()
+        )
         evaluation_return, eval_time = self._evaluation_executor.submit(
-            self._evaluator.evaluate_program_record_time, program
+            self._evaluator.evaluate_program_record_time,
+            program,
+            posttrain_context=posttrain_context,
         ).result()
 
         # Update function object with evaluation feedback and lineage
