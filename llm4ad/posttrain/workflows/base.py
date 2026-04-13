@@ -47,3 +47,9 @@ class BaseWorkflow:
 
     def get_resume_fn(self):
         raise NotImplementedError
+
+    def build_validation_spec(self):
+        return None
+
+    def build_smoke_spec(self):
+        return None

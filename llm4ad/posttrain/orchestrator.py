@@ -54,6 +54,8 @@ class PostTrainOrchestrator:
         smoke_spec=None,
     ):
         search_report = workflow.run_search_round(resume_path=resume_path)
+        validation_spec = validation_spec or workflow.build_validation_spec()
+        smoke_spec = smoke_spec or workflow.build_smoke_spec()
         records = self.collect_round_data(workflow, search_report)
         records = self.run_augment(records)
         records = self.run_synthesize(records)
