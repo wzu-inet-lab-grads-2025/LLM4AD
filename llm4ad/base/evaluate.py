@@ -230,7 +230,122 @@ class SecureEvaluator:
         result = self.evaluate_program(program, **kwargs)
         return result, time.time() - evaluate_start
 
+    def evaluate_program_record_time_with_diag(self, program: str | Program, **kwargs):
+        """评估并返回结构化诊断信息，且不额外重复执行第二条评估链。"""
+        evaluate_start = time.time()
+        result_packet = self.evaluate_program(program, _capture_eval_diag=True, **kwargs)
+        result, eval_diag = self._unpack_eval_result_with_diag(result_packet)
+        elapsed = time.time() - evaluate_start
+        if result is not None:
+            diag = {
+                'ok': True,
+                'bucket': 'ok',
+                'error_type': None,
+            }
+        else:
+            diag = {
+                'ok': False,
+                'bucket': 'eval_or_timeout',
+                'error_type': None,
+            }
+        if isinstance(eval_diag, dict):
+            diag.update(eval_diag)
+        return result, elapsed, diag
+
+    @staticmethod
+    def _pack_eval_result_with_diag(result, diag):
+        return {
+            '__llm4ad_eval_result_with_diag__': True,
+            'result': result,
+            'diag': diag if isinstance(diag, dict) else None,
+        }
+
+    @staticmethod
+    def _unpack_eval_result_with_diag(result_packet):
+        if isinstance(result_packet, dict) and result_packet.get('__llm4ad_eval_result_with_diag__') is True:
+            return result_packet.get('result'), result_packet.get('diag')
+        return result_packet, None
+
+    def _collect_eval_diag(self):
+        getter = getattr(self._evaluator, 'get_last_eval_diag', None)
+        if callable(getter):
+            try:
+                diag = getter()
+                if isinstance(diag, dict):
+                    return diag
+            except Exception:
+                pass
+        diag = getattr(self._evaluator, 'last_eval_diag', None)
+        if isinstance(diag, dict):
+            return diag
+        diag = getattr(self._evaluator, '_last_eval_diag', None)
+        if isinstance(diag, dict):
+            return diag
+        return None
+
+    def evaluate_program_with_profile(self, program: str | Program, **kwargs):
+        """安全执行 evaluator.evaluate_program_with_profile，返回 score 和 performance profile。"""
+        try:
+            program_str = str(program)
+            function_name = TextFunctionProgramConverter.text_to_function(program_str).name
+            program_str = self._modify_program_code(program_str)
+            if self._evaluator.safe_evaluate:
+                result_queue = multiprocessing.Queue()
+                process = multiprocessing.Process(
+                    target=self._evaluate_profile_in_safe_process,
+                    args=(program_str, function_name, result_queue),
+                    kwargs=kwargs,
+                    daemon=self._evaluator.daemon_eval_process
+                )
+                process.start()
+                if self._evaluator.timeout_seconds is not None:
+                    try:
+                        result = result_queue.get(timeout=self._evaluator.timeout_seconds)
+                    except:
+                        result = None
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        process.kill()
+                        process.join()
+                    return result
+                result = result_queue.get()
+                process.terminate()
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+                    process.join()
+                return result
+            return self._evaluate_profile(program_str, function_name, **kwargs)
+        except Exception:
+            if self._debug_mode:
+                print("DEBUG: Exception occurred in evaluate_program_with_profile:")
+                traceback.print_exc()
+            return None
+
+    def _evaluate_profile_in_safe_process(self, program_str: str, function_name, result_queue: multiprocessing.Queue, **kwargs):
+        """子进程内编译并执行 profile 评估。"""
+        try:
+            result_queue.put(self._evaluate_profile(program_str, function_name, **kwargs))
+        except Exception:
+            if self._debug_mode:
+                traceback.print_exc()
+            result_queue.put(None)
+
+    def _evaluate_profile(self, program_str: str, function_name, **kwargs):
+        """当前进程内编译并执行 profile 评估。"""
+        if not hasattr(self._evaluator, 'evaluate_program_with_profile'):
+            return None
+        if self._evaluator.exec_code:
+            all_globals_namespace = {}
+            exec(program_str, all_globals_namespace)
+            program_callable = all_globals_namespace[function_name]
+        else:
+            program_callable = None
+        return self._evaluator.evaluate_program_with_profile(program_str, program_callable, **kwargs)
+
     def _evaluate_in_safe_process(self, program_str: str, function_name, result_queue: multiprocessing.Queue, **kwargs):
+        capture_eval_diag = bool(kwargs.pop('_capture_eval_diag', False))
         try:
             if self._evaluator.exec_code:
                 # compile the program, and maps the global func/var/class name to its address
@@ -244,14 +359,21 @@ class SecureEvaluator:
 
             # get evaluate result
             res = self._evaluator.evaluate_program(program_str, program_callable, **kwargs)
-            result_queue.put(res)
+            if capture_eval_diag:
+                result_queue.put(self._pack_eval_result_with_diag(res, self._collect_eval_diag()))
+            else:
+                result_queue.put(res)
         except Exception as e:
             if self._debug_mode:
                 print("DEBUG: Exception occurred in evaluate_program:")
                 traceback.print_exc()  # 这将打印完整红色报错信息
-            result_queue.put(None)
+            if capture_eval_diag:
+                result_queue.put(self._pack_eval_result_with_diag(None, None))
+            else:
+                result_queue.put(None)
 
     def _evaluate(self, program_str: str, function_name, **kwargs):
+        capture_eval_diag = bool(kwargs.pop('_capture_eval_diag', False))
         try:
             if self._evaluator.exec_code:
                 # compile the program, and maps the global func/var/class name to its address
@@ -265,9 +387,13 @@ class SecureEvaluator:
 
             # get evaluate result
             res = self._evaluator.evaluate_program(program_str, program_callable, **kwargs)
+            if capture_eval_diag:
+                return self._pack_eval_result_with_diag(res, self._collect_eval_diag())
             return res
         except Exception as e:
             if self._debug_mode:
                 print("DEBUG: Exception occurred in evaluate_program:")
                 traceback.print_exc()  # 这将打印完整红色报错信息
+            if capture_eval_diag:
+                return self._pack_eval_result_with_diag(None, None)
             return None

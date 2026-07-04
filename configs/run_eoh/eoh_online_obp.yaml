@@ -1,0 +1,68 @@
+online_run:  # 纯在线方法总配置，可通过 method.name 切换 eoh、funsearch、mcts_ahd、reevo
+  llm_mode: online  # 固定为在线模型模式
+  online_model_config_dir: configs/run_eoh/online_models  # 在线模型配置目录
+  online_model:  # 当前使用的在线模型选择
+    name: volcengine  # 默认使用火山方舟编码模型，可改为 deepseek 或 aliyun
+    overrides: {}  # 可选覆盖项
+  method:  # 在线搜索方法配置，修改 name 和 params 即可切换方法
+    name: eoh  # 默认使用 EoH，可改为 funsearch、mcts_ahd 或 reevo
+    params:  # 当前方法构造参数，字段会原样传给对应方法类
+      max_generations: 500  # EoH 最大进化代数
+      max_sample_nums: 200  # 最大评估样本数
+      pop_size: 10  # 活跃种群大小，可被当前 scale 的 pop_size 覆盖
+      selection_num: 2  # EoH/MCTS_AHD 父代选择数量
+      use_e2_operator: true  # EoH 是否启用 E2 组合算子
+      use_m1_operator: true  # EoH 是否启用 M1 变异算子
+      use_m2_operator: true  # EoH 是否启用 M2 变异算子
+      num_samplers: 1  # 在线模型并行采样线程数
+      num_evaluators: 4  # 候选程序并行评估 worker 数
+      multi_thread_or_process_eval: thread  # 评估执行器类型
+      debug_mode: false  # 是否开启调试模式
+  logging:  # 运行日志配置
+    log_base_dir: /home/yuanyilun/projects/source/LLM4AD/logs  # 日志根目录，最终写入 logs/OBP/{method}_online
+    allow_existing_run_dir: false  # 是否允许复用已存在的 run 目录
+  obp:  # OBP 任务配置
+    task_name: online_bin_packing  # 任务注册名
+    default_scale: small_1k_c100  # 默认运行规模
+    params:  # 默认任务参数说明
+      n_instances: 5  # 评估实例数量
+      n_items: 1000  # 每个实例物品数量
+      capacity: 100  # 箱子容量
+      timeout_seconds: 30  # 单个候选程序评估超时时间秒数
+    scales:  # 可选任务规模集合
+      small_1k_c100:  # small_1k_c100 规模配置
+        n_instances: 5  # 评估实例数量
+        n_items: 1000  # 每个实例物品数量
+        capacity: 100  # 箱子容量
+        timeout_seconds: 30  # 单个候选程序评估超时时间秒数
+        pop_size: 10  # 该规模下覆盖 method.params.pop_size 的种群大小
+      small_1k_c500:  # small_1k_c500 规模配置
+        n_instances: 5  # 评估实例数量
+        n_items: 1000  # 每个实例物品数量
+        capacity: 500  # 箱子容量
+        timeout_seconds: 30  # 单个候选程序评估超时时间秒数
+        pop_size: 10  # 该规模下覆盖 method.params.pop_size 的种群大小
+      medium_5k_c100:  # medium_5k_c100 规模配置
+        n_instances: 5  # 评估实例数量
+        n_items: 5000  # 每个实例物品数量
+        capacity: 100  # 箱子容量
+        timeout_seconds: 30  # 单个候选程序评估超时时间秒数
+        pop_size: 10  # 该规模下覆盖 method.params.pop_size 的种群大小
+      medium_5k_c500:  # medium_5k_c500 规模配置
+        n_instances: 5  # 评估实例数量
+        n_items: 5000  # 每个实例物品数量
+        capacity: 500  # 箱子容量
+        timeout_seconds: 30  # 单个候选程序评估超时时间秒数
+        pop_size: 10  # 该规模下覆盖 method.params.pop_size 的种群大小
+      large_10k_c100:  # large_10k_c100 规模配置
+        n_instances: 5  # 评估实例数量
+        n_items: 10000  # 每个实例物品数量
+        capacity: 100  # 箱子容量
+        timeout_seconds: 30  # 单个候选程序评估超时时间秒数
+        pop_size: 10  # 该规模下覆盖 method.params.pop_size 的种群大小
+      large_10k_c500:  # large_10k_c500 规模配置
+        n_instances: 5  # 评估实例数量
+        n_items: 10000  # 每个实例物品数量
+        capacity: 500  # 箱子容量
+        timeout_seconds: 30  # 单个候选程序评估超时时间秒数
+        pop_size: 10  # 该规模下覆盖 method.params.pop_size 的种群大小

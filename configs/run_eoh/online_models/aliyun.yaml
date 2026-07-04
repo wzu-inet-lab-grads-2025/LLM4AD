@@ -1,0 +1,11 @@
+online_model:  # 阿里云百炼在线模型配置
+  provider: aliyun  # 在线模型供应商名称
+  backend: openai_compatible  # 使用 OpenAI-compatible Chat Completions 接口
+  base_url: https://llm-mtlb5ev494ms9y4l.cn-beijing.maas.aliyuncs.com/compatible-mode/v1  # 阿里云兼容模式 API 基础地址
+  api_key_env: QWEN_API_KEY  # 读取 API key 的环境变量名
+  model: qwen-plus  # 调用的模型名称
+  timeout: 120  # 单次 API 请求超时时间，单位秒
+  generation:  # 生成参数配置
+    max_tokens: 4096  # 单次生成的最大 token 数
+    temperature: 1.0  # 采样温度
+    top_p: 1.0  # nucleus sampling 的 top-p 阈值

@@ -186,6 +186,7 @@ class CVRPEvaluation(Evaluation):
         return route
 
     def evaluate(self, heuristic):
+        """按原有路径返回平均性能分数，不生成诊断 profile。"""
         dis = np.ones(self.n_instance)
         n_ins = 0
 
@@ -200,8 +201,31 @@ class CVRPEvaluation(Evaluation):
         ave_dis = np.average(dis)
         return -ave_dis
 
+    def evaluate_with_profile(self, heuristic):
+        """逐实例评估 CVRP 路径成本，并以负成本作为最大化分数。"""
+        profile = []
+        n_ins = 0
+
+        for instance, distance_matrix, demands, vehicle_capacity in self._datasets:
+            route = self.route_construct(distance_matrix, demands, vehicle_capacity, heuristic)
+            if route is None:
+                return None
+            LLM_dis = self.tour_cost(instance, route)
+            profile.append(-float(LLM_dis))
+            n_ins += 1
+            if n_ins == self.n_instance:
+                break
+
+        if not profile:
+            return None
+        return {"score": float(np.mean(profile)), "performance_profile": profile}
+
     def evaluate_program(self, program_str: str, callable_func: callable) -> Any | None:
         return self.evaluate(callable_func)
+
+    def evaluate_program_with_profile(self, program_str: str, callable_func: callable) -> dict | None:
+        """返回平均分和逐实例 performance profile，供 EoH-RL 入池去重使用。"""
+        return self.evaluate_with_profile(callable_func)
 
 
 if __name__ == '__main__':

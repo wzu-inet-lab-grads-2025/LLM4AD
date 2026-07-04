@@ -77,6 +77,10 @@ class JSSPEvaluation(Evaluation):
     def evaluate_program(self, program_str: str, callable_func: Callable) -> Any | None:
         return self.evaluate(callable_func)
 
+    def evaluate_program_with_profile(self, program_str: str, callable_func: Callable) -> dict | None:
+        """返回平均分和逐实例 performance profile，供 EoH-RL 入池去重使用。"""
+        return self.evaluate_with_profile(callable_func)
+
     def plot_solution(self, schedule: List[List[Tuple[int, int, int]]], n_jobs: int, n_machines: int):
         """
         Plots the schedule as a Gantt chart.
@@ -168,19 +172,7 @@ class JSSPEvaluation(Evaluation):
         return makespan, operation_sequence
 
     def evaluate(self, eva: Callable) -> float:
-        """
-        Evaluate the constructive heuristic for JSSP.
-        
-        Args:
-            instance_data: List of tuples containing the processing times, number of jobs, and number of machines.
-            n_ins: Number of instances to evaluate.
-            n_jobs: Number of jobs.
-            n_machines: Number of machines.
-            eva: The constructive heuristic function to evaluate.
-        
-        Returns:
-            The average makespan across all instances.
-        """
+        """按原有路径返回平均性能分数，不生成诊断 profile。"""
         makespans = []
 
         for instance in self._datasets[:self.n_instance]:
@@ -189,7 +181,20 @@ class JSSPEvaluation(Evaluation):
             makespans.append(makespan)
 
         average_makespan = np.mean(makespans)
-        return -average_makespan  # Negative because we want to minimize the makespan
+        return -average_makespan
+
+    def evaluate_with_profile(self, eva: Callable) -> dict | None:
+        """逐实例评估 JSSP makespan，并以负 makespan 作为最大化分数。"""
+        profile = []
+
+        for instance in self._datasets[:self.n_instance]:
+            processing_times, n1, n2 = instance
+            makespan, solution = self.schedule_jobs(processing_times, n1, n2, eva)
+            profile.append(-float(makespan))
+
+        if not profile:
+            return None
+        return {"score": float(np.mean(profile)), "performance_profile": profile}
 
 
 if __name__ == '__main__':

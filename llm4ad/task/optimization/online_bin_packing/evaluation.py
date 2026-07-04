@@ -79,6 +79,10 @@ class OBPEvaluation(Evaluation):
     def evaluate_program(self, program_str: str, callable_func: callable) -> Any | None:
         return self.evaluate(callable_func)
 
+    def evaluate_program_with_profile(self, program_str: str, callable_func: callable) -> dict | None:
+        """返回平均分和逐实例 performance profile，供 EoH-RL 入池去重使用。"""
+        return self.evaluate_with_profile(callable_func)
+
     def plot_solution(self, bins_packed: np.ndarray, items: list, capacity: int, max_unused_bins: int = 5):
         """
         Plot the solution of the 1D Online Bin Packing Problem, omitting unused bins.
@@ -191,9 +195,23 @@ class OBPEvaluation(Evaluation):
         return packing, bins
 
     def evaluate(self, priority: callable) -> float:
-        """Evaluate heuristic function on a set of online binpacking instances."""
-        # List storing number of bins used for each instance.
+        """按原有路径返回平均性能分数，不生成诊断 profile。"""
         num_bins = []
+        for name in self._datasets:
+            instance = self._datasets[name]
+            capacity = instance['capacity']
+            items = instance['items']
+            bins = np.array([capacity for _ in range(instance['num_items'])])
+            _, bins_packed = self.online_binpack(items, bins, priority)
+            if getattr(self, "debug_mode", False):
+                self.plot_solution(bins_packed, items, capacity, max_unused_bins=5)
+            num_bins.append((bins_packed != capacity).sum())
+        return -np.mean(num_bins)
+
+    def evaluate_with_profile(self, priority: callable) -> dict | None:
+        """逐实例评估使用 bin 数，并以负 bin 数作为最大化分数。"""
+        # List storing number of bins used for each instance.
+        profile = []
         # Perform online binpacking for each instance.
         for name in self._datasets:
             instance = self._datasets[name]
@@ -208,10 +226,12 @@ class OBPEvaluation(Evaluation):
 
             # If remaining capacity in a bin is equal to initial capacity, then it is
             # unused. Count number of used bins.
-            num_bins.append((bins_packed != capacity).sum())
+            profile.append(-float((bins_packed != capacity).sum()))
         # Score of heuristic function is negative of average number of bins used
         # across instances (as we want to minimize number of bins).
-        return -np.mean(num_bins)
+        if not profile:
+            return None
+        return {"score": float(np.mean(profile)), "performance_profile": profile}
 
 
 if __name__ == '__main__':

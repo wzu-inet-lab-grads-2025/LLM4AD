@@ -1,0 +1,171 @@
+eoh_rl:  # 本地 EoH-RL 总配置
+  llm_mode: local  # 使用本地模型模式
+  local_model_path: /home/yuanyilun/models/deepseek-coder-7b-instruct-v1.5  # 本地基模型路径
+  inference_gpus:  # resident 推理使用的物理 GPU 列表
+    - 2  # 使用第 2 张 GPU 推理
+  inference_ports:  # 推理服务端口列表
+    - 22003  # 第一个推理端口
+  training_gpus:  # GRPO/SFT 训练使用的物理 GPU 列表
+    - 2  # 使用第 2 张 GPU 训练
+  pytorch_alloc_conf: "expandable_segments:True"  # PyTorch CUDA 显存分配策略
+  lora:  # LoRA adapter 配置
+    r: 32  # LoRA 秩
+    alpha: 64  # LoRA 缩放系数
+    dropout: 0.0  # LoRA dropout 概率
+    target_modules:  # 注入 LoRA 的线性层名称
+      - q_proj  # attention query 投影层
+      - v_proj  # attention value 投影层
+      - k_proj  # attention key 投影层
+      - o_proj  # attention output 投影层
+      - gate_proj  # MLP gate 投影层
+      - up_proj  # MLP up 投影层
+      - down_proj  # MLP down 投影层
+  sft:  # 初始 SFT LoRA 配置
+    mode: load_existing  # 直接加载已有 SFT LoRA，不重新训练 SFT
+    learning_rate: 0.0002  # SFT 学习率
+    num_epochs: 2  # SFT 训练轮数
+    per_device_train_batch_size: 4  # SFT 单卡 batch size
+    gradient_accumulation_steps: 4  # SFT 梯度累积步数
+    max_prompt_length: 4000  # SFT prompt 最大 token 长度
+    max_completion_length: 1000  # SFT completion 最大 token 长度
+    max_seq_length: 4096  # SFT 模型最大序列长度
+    warmup_ratio: 0.1  # SFT warmup 比例
+    weight_decay: 0.01  # SFT 权重衰减
+    max_grad_norm: 1.0  # SFT 梯度裁剪阈值
+    lr_scheduler_type: cosine  # SFT 学习率调度器
+    quantization: 4bit  # SFT 加载量化方式
+    bf16: true  # SFT 是否使用 bf16
+    gradient_checkpointing: true  # SFT 是否启用梯度检查点
+    logging_steps: 10  # SFT 日志间隔步数
+    seed: 42  # SFT 随机种子
+    output_dir: /home/yuanyilun/projects/source/LLM4AD/data/SFT/tsp/small  # SFT 输出目录
+    load_lora_path: /home/yuanyilun/projects/LLM4AD/data/SFT/tsp/small/lora_sft  # load_existing 模式下加载的 LoRA 路径
+    source_dirs:  # SFT 数据源目录
+      - /home/yuanyilun/projects/LLM4AD/data/tsp_eoh  # TSP 历史样本目录
+    data_cleaner:  # SFT 数据清洗配置
+      top_ratio: 0.2  # 每个任务保留的高分样本比例
+      balance_tasks: true  # 是否平衡不同任务来源
+      score_filter_min: null  # 最小分数过滤阈值
+      score_filter_max: null  # 最大分数过滤阈值
+      dedup_strategy: ast_struct  # 代码去重策略
+      filter_invalid_code: true  # 是否过滤无效代码
+      max_per_task: null  # 每个任务最多保留样本数
+  inference_backend: unsloth_resident  # 推理后端类型
+  inference_quantization: bitsandbytes  # 推理侧量化方式，当前 resident 主路径使用 bitsandbytes 4bit
+  inference_skip_quantization_for_merged: false  # resident 主路径当前不支持 merged 模型跳过量化
+  vllm:  # resident vLLM 采样配置
+    gpu_memory_utilization: 0.8  # vLLM 可使用显存比例
+    max_tokens: 4096  # 单个 completion 最大生成 token 数
+    temperature: 1.0  # 采样温度
+    top_p: 1.0  # nucleus sampling 阈值
+  evolution:  # 进化与采样预算配置
+    max_generations: 500  # 最多在线 GRPO update 次数
+    max_sample_nums: 999999999  # 最大采样预算，确保初始化可填满 10 个种群后继续训练
+    pop_size: 10  # 活跃种群大小
+    num_samplers: 1  # 并行采样器数量
+    num_evaluators: 4  # 并行评估器数量
+  grpo:  # GRPO 训练配置
+    backend: resident_unsloth_trl  # GRPO 后端类型
+    rollout_source: integrated_grouped_eoh_operator  # rollout prompt 来源
+    trigger_every_n_generations: 1  # 每代触发一次在线训练
+    prompts_per_update: 1  # 每次 update 的 prompt 数量
+    operator_cycle:  # 训练阶段算子轮转顺序
+      - m1  # 单父代变异算子 m1
+      - m2  # 单父代变异算子 m2
+      - e1  # 双父代组合算子 e1
+      - e2  # 双父代组合算子 e2
+    anchor_baseline: best  # anchor 策略基线来源
+    use_vllm: true  # TRL GRPO 是否启用 vLLM
+    vllm_mode: colocate  # vLLM 与训练进程共置模式
+    vllm_model_impl: vllm  # vLLM 模型实现
+    vllm_enable_sleep_mode: false  # 是否启用 vLLM sleep mode
+    vllm_server_host: 127.0.0.1  # vLLM 服务地址
+    vllm_server_port: 22003  # vLLM server 端口
+    vllm_server_timeout: 240.0  # vLLM server 超时时间秒数
+    vllm_group_port: 51215  # vLLM 分布式通信端口
+    vllm_gpu_memory_utilization: 0.8  # TRL 侧 vLLM 显存比例
+    vllm_tensor_parallel_size: 1  # vLLM tensor parallel 大小
+    vllm_max_model_length: 4096  # TRL 侧 vLLM 最大上下文长度
+    gpu_memory_utilization: 0.8  # Unsloth 加载时的 vLLM 显存比例
+    max_prompt_length: 4000  # GRPO prompt 最大 token 长度
+    max_completion_length: 1000  # GRPO completion 最大 token 长度
+    num_generations: 4  # 每个 prompt 的 completion 数量
+    temperature: 1.0  # GRPO rollout 采样温度
+    top_p: 1.0  # GRPO rollout top-p 概率阈值
+    beta: 0.04  # KL 惩罚系数；对齐原版高性能 TSP100 日志的更新强度
+    epsilon: 0.15  # GRPO 裁剪 epsilon
+    learning_rate: 5.0e-5  # GRPO 学习率；对齐原版高性能 TSP100 日志
+    lr_scheduler_type: constant  # GRPO 学习率调度器
+    optim: adamw_8bit  # GRPO 优化器
+    adam_beta1: 0.9  # Adam 一阶动量系数
+    adam_beta2: 0.99  # Adam 二阶动量系数
+    scale_rewards: group  # reward 归一化方式
+    loss_type: dapo  # GRPO loss 类型
+    num_iterations: 1  # 每批 rollout 的优化迭代数
+    num_train_epochs: 1  # 每次 update 的训练 epoch 数
+    per_device_train_batch_size: 4  # GRPO 单卡 batch size
+    gradient_accumulation_steps: 1  # GRPO 梯度累积步数
+    max_seq_length: 4096  # resident 模型最大序列长度
+    warmup_ratio: 0.0  # GRPO warmup 比例
+    weight_decay: 0.1  # GRPO 权重衰减
+    max_grad_norm: 0.1  # GRPO 梯度裁剪阈值
+    bf16: true  # GRPO 是否使用 bf16
+    fp16: false  # GRPO 是否使用 fp16
+    quantization: 4bit  # resident 模型量化方式
+    gradient_checkpointing: true  # GRPO 是否启用梯度检查点
+    cuda_empty_cache_interval: 10  # 每隔多少个 update 强制清理一次 CUDA cache；1 表示完全对齐原版每轮清理
+    seed: 42  # GRPO 随机种子
+    logging_steps: 1  # GRPO 日志间隔步数
+    save_strategy: "no"  # TRL Trainer 保存策略
+    save_steps: 500  # TRL Trainer 保存间隔步数
+    remove_unused_columns: false  # 是否删除未使用列
+    report_to: "none"  # 训练指标上报后端
+    deploy_policy: gated  # LoRA 部署策略
+    lora_gate:  # SFT 锚定 LoRA 信任域控制器
+      enabled: true  # 是否启用 LoRA 控制器；false 表示每轮训练后直接部署 LoRA
+      anchor_radius: 0.50  # 候选 LoRA 到 SFT anchor 的最大相对距离，超出后投影回信任域
+      step_radius: 0.25  # 单轮候选 LoRA 到上一版 LoRA 的最大相对距离，超出后投影回信任域
+    lora_checkpoint_policy: latest_and_best  # LoRA checkpoint 保存策略
+    lora_save_dtype: bf16  # LoRA 保存 dtype
+    event_ledger_max_recent: 200  # reward 事件最近窗口大小
+  rl:  # 在线 RL 控制配置
+    enabled: true  # 是否启用在线 GRPO
+    enable_ast_gate: false  # 是否在采样重试阶段启用 AST 预检
+    samples_per_prompt: 4  # 每个 prompt 的采样数量
+    checkpoint_auto_resume: true  # 是否自动从最新 checkpoint 恢复
+  adaptive_operator:  # 自适应算子调度配置
+    enabled: true  # 是否启用自适应算子调度
+    mode: sgca_v1  # 自适应调度模式
+  collapse:  # 保守停滞坍缩配置
+    enabled: true  # 是否启用自适应坍缩兜底机制
+  task_rl_common:  # 任务 reward 通用配置
+    reward_type: bqr_v1  # reward 类型
+    minimize: false  # TSP reward 是否按分数越小越优
+    detect_randomness: true  # 是否检测随机性
+    invalid_reward: -1.0  # 无效候选 reward
+    epsilon: 1.0e-6  # 数值比较容差
+  logging:  # 日志配置
+    log_base_dir: /home/yuanyilun/projects/source/LLM4AD/logs  # 日志根目录
+  tsp:  # TSP 任务配置
+    task_name: tsp_construct  # 任务注册名称
+    default_scale: small  # 默认任务规模
+    params:  # 默认任务参数说明
+      problem_size: 50  # TSP 节点数量
+      n_instance: 64  # 评估实例数量
+      timeout_seconds: 30  # 单次评估超时时间秒数
+    scales:  # 可选任务规模集合
+      small:  # small 规模配置
+        problem_size: 50  # TSP 节点数量
+        n_instance: 64  # 评估实例数量
+        timeout_seconds: 30  # 单次评估超时时间秒数
+        pop_size: 10  # 该规模下的活跃种群大小
+      medium-100:  # medium-100 规模配置
+        problem_size: 100  # TSP 节点数量
+        n_instance: 64  # 评估实例数量
+        timeout_seconds: 30  # 单次评估超时时间秒数
+        pop_size: 10  # 该规模下的活跃种群大小
+      medium-200:  # medium-200 规模配置
+        problem_size: 200  # TSP 节点数量
+        n_instance: 64  # 评估实例数量
+        timeout_seconds: 30  # 单次评估超时时间秒数
+        pop_size: 10  # 该规模下的活跃种群大小

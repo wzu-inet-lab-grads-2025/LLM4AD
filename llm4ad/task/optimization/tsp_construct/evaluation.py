@@ -74,6 +74,10 @@ class TSPEvaluation(Evaluation):
     def evaluate_program(self, program_str: str, callable_func: callable) -> Any | None:
         return self.evaluate(callable_func)
 
+    def evaluate_program_with_profile(self, program_str: str, callable_func: callable) -> dict | None:
+        """返回平均分和逐实例 performance profile，供 EoH-RL 入池去重使用。"""
+        return self.evaluate_with_profile(callable_func)
+
     def tour_cost(self, instance, solution, problem_size):
         cost = 0
         for j in range(problem_size - 1):
@@ -94,7 +98,7 @@ class TSPEvaluation(Evaluation):
         return neighborhood_matrix
 
     def evaluate(self, eva: callable) -> float:
-
+        """按原有路径返回平均性能分数，不生成诊断 profile。"""
         n_max = self.n_instance
         dis = np.ones(self.n_instance)
         n_ins = 0
@@ -145,9 +149,64 @@ class TSPEvaluation(Evaluation):
                 break
             # self.route_plot(instance,route,self.oracle[n_ins])
 
-        ave_dis = np.average(dis)
-        # print("average dis: ",ave_dis)
-        return -ave_dis
+        return -np.average(dis)
+
+    def evaluate_with_profile(self, eva: callable) -> dict | None:
+        """逐实例评估 TSP 路径长度，并以负距离作为最大化分数。"""
+
+        n_max = self.n_instance
+        profile = []
+        n_ins = 0
+
+        for instance, distance_matrix in self._datasets:
+
+            # get neighborhood matrix
+            neighbor_matrix = self.generate_neighborhood_matrix(instance)
+
+            destination_node = 0
+
+            current_node = 0
+
+            route = np.zeros(self.problem_size)
+            # print(">>> Step 0 : select node "+str(instance[0][0])+", "+str(instance[0][1]))
+            for i in range(1, self.problem_size - 1):
+
+                near_nodes = neighbor_matrix[current_node][1:]
+
+                mask = ~np.isin(near_nodes, route[:i])
+
+                unvisited_near_nodes = near_nodes[mask]
+
+                next_node = eva(current_node, destination_node, unvisited_near_nodes, distance_matrix)
+
+                if next_node in route:
+                    # print("wrong algorithm select duplicate node, retrying ...")
+                    return None
+
+                current_node = next_node
+
+                route[i] = current_node
+
+            mask = ~np.isin(np.arange(self.problem_size), route[:self.problem_size - 1])
+
+            last_node = np.arange(self.problem_size)[mask]
+
+            current_node = last_node[0]
+
+            route[self.problem_size - 1] = current_node
+
+            LLM_dis = self.tour_cost(instance, route, self.problem_size)
+
+            profile.append(-float(LLM_dis))
+
+            n_ins += 1
+            if n_ins == self.n_instance:
+                break
+            # self.route_plot(instance,route,self.oracle[n_ins])
+
+        if not profile:
+            return None
+        return {"score": float(np.mean(profile)), "performance_profile": profile}
 
 
 if __name__ == '__main__':

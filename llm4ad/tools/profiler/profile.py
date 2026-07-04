@@ -133,7 +133,6 @@ class ProfilerBase:
             'sample_order': sample_order,
             'function': str(function),
             'score': function.score,
-            'operator': function.operator,
             'program': program,
         }
 
@@ -273,13 +272,45 @@ class ProfilerBase:
         self._logger_txt.info('====================================================================')
         self._logger_txt.info('Method Parameters')
         self._logger_txt.info('--------------------------------------------------------------------')
-        self._logger_txt.info(f'  - Method: {method.__class__.__name__}')
+        method_name = 'EoHRL' if hasattr(method, '_rl_enabled') else method.__class__.__name__
+        self._logger_txt.info(f'  - Method: {method_name}')
+        for attr, value in self._iter_method_log_items(method):
+            self._logger_txt.info(f'  - {attr}: {value}')
+
+        self._logger_txt.info('=====================================================================')
+
+    @staticmethod
+    def _iter_method_log_items(method):
+        original_order = [
+            '_max_generations',
+            '_max_sample_nums',
+            '_pop_size',
+            '_selection_num',
+            '_use_e2_operator',
+            '_use_m1_operator',
+            '_use_m2_operator',
+            '_num_samplers',
+            '_num_evaluators',
+            '_resume_mode',
+            '_debug_mode',
+            '_multi_thread_or_process_eval',
+            '_function_to_evolve_name',
+            '_task_name',
+            '_rl_enabled',
+            '_grpo_runtime_cfg',
+            '_bootstrap_done',
+            '_tot_sample_nums',
+            '_initial_sample_nums_max',
+            '_evaluation_executor',
+        ]
+        if hasattr(method, '_rl_enabled'):
+            return [(attr, getattr(method, attr)) for attr in original_order if hasattr(method, attr)]
+        items = []
         for attr, value in method.__dict__.items():
             if attr not in ['llm', '_evaluator', '_profiler', '_template_program_str', '_template_program',
                             '_function_to_evolve', '_population', '_sampler', '_task_description_str']:
-                self._logger_txt.info(f'  - {attr}: {value}')
-
-        self._logger_txt.info('=====================================================================')
+                items.append((attr, value))
+        return items
 
     @classmethod
     def load_logfile(cls, logdir, valid_only=False) -> Tuple[List[str], List[float]]:

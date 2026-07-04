@@ -1,0 +1,11 @@
+online_model:  # DeepSeek 在线模型配置
+  provider: deepseek  # 在线模型供应商名称
+  backend: openai_compatible  # 使用 OpenAI-compatible Chat Completions 接口
+  base_url: https://api.deepseek.com  # DeepSeek API 基础地址
+  api_key_env: DEEPSEEK_API_KEY  # 读取 API key 的环境变量名
+  model: deepseek-v4-pro  # 调用的模型名称
+  timeout: 120  # 单次 API 请求超时时间，单位秒
+  generation:  # 生成参数配置
+    max_tokens: 4096  # 单次生成的最大 token 数
+    temperature: 1.0  # 采样温度
+    top_p: 1.0  # nucleus sampling 的 top-p 阈值
