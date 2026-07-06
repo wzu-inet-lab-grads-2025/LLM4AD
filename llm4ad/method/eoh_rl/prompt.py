@@ -33,7 +33,7 @@ class EoHPrompt:
         parent_ids: List[int] | None = None,
         population_best_score: float | None = None,
         group_size: int = 1,
-        reward_contract: str = "bqr_v1",
+        reward_contract: str = "four_state_v1",
         system_prompt: str | None = None,
     ) -> Dict:
         user_prompt = str(prompt or "").strip()
@@ -58,7 +58,7 @@ class EoHPrompt:
             "parent_ids": None if parent_ids is None else list(parent_ids),
             "population_best_score": population_best_score,
             "group_size": int(group_size),
-            "reward_contract": str(reward_contract or "bqr_v1"),
+            "reward_contract": str(reward_contract or "four_state_v1"),
         }
 
     @staticmethod
@@ -120,10 +120,9 @@ class EoHPrompt:
     def _output_requirements(cls, template_function: Function) -> str:
         temp_func = cls._empty_template_function(template_function)
         return (
-            "1. First, describe your new algorithm and main steps in one sentence.\n"
-            "2. Next, implement the following Python function:\n"
+            "Implement the following Python function:\n"
             f"{str(temp_func)}\n"
-            "Do not give additional explanations. Avoid long explanatory comments and unnecessary blank lines."
+            "Return a single Python code block. Avoid extra explanations, long comments, and unnecessary blank lines."
         )
 
     @classmethod

@@ -7,6 +7,13 @@ from datetime import datetime
 from typing import Any
 
 
+def _fmt(value, digits: int = 4) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return "None"
+
+
 class EoHProfiler:
     """EoH-RL 最小日志器：只保留恢复、分析日志和样本审计需要的信息。"""
 
@@ -55,21 +62,41 @@ class EoHProfiler:
     def record_parameters(self, llm, evaluation, method) -> None:
         if not self._log_dir:
             return
-        self._append_run_log({"llm": llm.__class__.__name__, "problem": evaluation.__class__.__name__, "method": "EoHRL", "max_generations": getattr(method, "_max_generations", None), "max_sample_nums": getattr(method, "_max_sample_nums", None), "pop_size": getattr(method, "_pop_size", None), "samples_per_prompt": getattr(method, "_samples_per_prompt", None), "grpo": getattr(method, "_grpo_config", None)})
+        max_generations = getattr(method, "_max_generations", None)
+        if max_generations is None:
+            max_generations = getattr(method, "_max_grpo_updates", None)
+        self._append_run_log({"llm": llm.__class__.__name__, "problem": evaluation.__class__.__name__, "method": "EoHRL", "max_generations": max_generations, "max_sample_nums": getattr(method, "_max_sample_nums", None), "pop_size": getattr(method, "_pop_size", None), "samples_per_prompt": getattr(method, "_samples_per_prompt", None), "grpo": getattr(method, "_grpo_config", None)})
 
-    def register_function(self, function, program: str = "", *, resume_mode: bool = False, source: str | None = None) -> None:
+    def register_function(
+        self,
+        function,
+        program: str = "",
+        *,
+        resume_mode: bool = False,
+        source: str | None = None,
+        record_best: bool = True,
+    ) -> None:
         self._num_samples += 1
         score = getattr(function, "score", None)
         self._evaluate_success_program_num += int(score is not None)
         self._evaluate_failed_program_num += int(score is None)
-        if score is not None and float(score) > self._cur_best_program_score:
+        if record_best and score is not None and float(score) > self._cur_best_program_score:
             self._cur_best_program_score = float(score)
             if not resume_mode:
                 self._write_sample(function, program, source=source, record_type="best")
         if not resume_mode:
             self._write_sample(function, program, source=source, record_type="history")
             if self._log_style == "complex":
-                print(f"[EoHRL] sample={self._num_samples} source={source or getattr(function, '_eoh_source', '-')} operator={getattr(function, 'operator', None)} score={getattr(function, 'score', None)}")
+                sample_source = self._display_source(function, source)
+                print(
+                    "[EoHRL:candidate] "
+                    f"sample={self._num_samples} "
+                    f"source={sample_source} "
+                    f"op={getattr(function, 'operator', None)} "
+                    f"score={_fmt(getattr(function, 'score', None))} "
+                    f"best={_fmt(self._cur_best_program_score)} "
+                    f"eval={_fmt(getattr(function, 'evaluate_time', None), 2)}s"
+                )
 
     def register_population(self, pop) -> None:
         generation = int(getattr(pop, "generation", 0) or 0)
@@ -85,9 +112,7 @@ class EoHProfiler:
         if not self._log_dir:
             return
         sample_order = int(getattr(function, "_eoh_sample_order", None) or self._num_samples)
-        payload = {**self._serialize_function(function), "sample_order": sample_order, "profiler_sample_order": self._num_samples, "program": program}
-        if source is not None:
-            payload["source"] = source
+        payload = self._serialize_sample(function, sample_order=sample_order, source=source)
         lower = ((sample_order - 1) // 200) * 200 + 1
         filename = "samples_best.json" if record_type == "best" else f"samples_{lower}~{lower + 199}.json"
         path = os.path.join(self._samples_json_dir, filename)
@@ -100,6 +125,20 @@ class EoHProfiler:
         self._write_json(path, rows)
 
     @staticmethod
+    def _serialize_sample(func, *, sample_order: int, source: str | None) -> dict:
+        return {
+            "sample_order": sample_order,
+            "algorithm": getattr(func, "algorithm", "") or "",
+            "function": str(func),
+            "score": getattr(func, "score", None),
+            "program": "",
+            "parent_id": getattr(func, "_eoh_parent_id", None),
+            "op": getattr(func, "_eoh_op", None) or getattr(func, "operator", None),
+            "source": EoHProfiler._display_source(func, source),
+            "eval_diag": EoHProfiler._clean_eval_diag(getattr(func, "_eval_diag", None)),
+        }
+
+    @staticmethod
     def _serialize_function(func) -> dict:
         payload = {key: value for key, value in {"algorithm": getattr(func, "algorithm", ""), "function": str(func), "score": getattr(func, "score", None), "evaluate_time": getattr(func, "evaluate_time", None), "sample_time": getattr(func, "sample_time", None), "operator": getattr(func, "operator", None)}.items()}
         for attr, key in (("_eoh_sample_order", "sample_order"), ("_eoh_parent_id", "parent_id"), ("_eoh_op", "op"), ("_eoh_source", "source"), ("_eoh_birth_sample_order", "birth_sample_order"), ("_eoh_birth_generation", "birth_generation"), ("_eoh_lineage_tag", "lineage_tag")):
@@ -108,8 +147,28 @@ class EoHProfiler:
                 payload[key] = value
         diag = getattr(func, "_eval_diag", None)
         if isinstance(diag, dict):
-            payload["eval_diag"] = {k: v for k, v in diag.items() if k not in {"performance_profile", "profile_score"}}
+            payload["eval_diag"] = EoHProfiler._clean_eval_diag(diag)
         return payload
+
+    @staticmethod
+    def _display_source(func, source: str | None) -> str:
+        raw = getattr(func, "_eoh_source", None) or source or "local"
+        return "local" if str(raw).strip().lower() in {"initialization", "grpo", "resident", "resident_grpo"} else str(raw)
+
+    @staticmethod
+    def _clean_eval_diag(diag) -> dict | None:
+        if not isinstance(diag, dict):
+            return None
+        blocked = {"performance_profile", "profile_score"}
+        cleaned = {k: v for k, v in diag.items() if k not in blocked}
+        if "ok" not in cleaned and "bucket" not in cleaned and "error_type" not in cleaned:
+            return None
+        return {
+            "ok": bool(cleaned.get("ok", False)),
+            "bucket": cleaned.get("bucket"),
+            "error_type": cleaned.get("error_type"),
+            **{k: v for k, v in cleaned.items() if k not in {"ok", "bucket", "error_type"}},
+        }
 
     def _append_run_log(self, payload: dict[str, Any]) -> None:
         path = os.path.join(self._log_dir, "run_log.txt")

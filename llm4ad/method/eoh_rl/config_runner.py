@@ -4,14 +4,20 @@ import json
 import logging
 import os
 import sys
+import warnings
 
 import yaml
 from omegaconf import DictConfig, OmegaConf
 
+os.environ.setdefault("MPLCONFIGDIR", os.path.join("/tmp", f"llm4ad_matplotlib_{os.getuid()}"))
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+logging.getLogger("matplotlib").setLevel(logging.ERROR)
+
+from .args import apply_runtime_defaults
 from .eoh_rl import EoH
 from .profiler import EoHProfiler
-from .rl.grpo_trainer import ResidentGRPOLLm, ResidentGRPOPolicy
-from .rl.reward import build_reward_fn_from_task_rl
+from .rl.grpo_trainer import ResidentGRPOLLm, ResidentGRPOPolicy, build_reward_fn_from_task_rl
 from .rl.sft_train import normalize_lora_config, run_sft_pipeline
 from ...task.optimization.cvrp_construct import CVRPEvaluation
 from ...task.optimization.jssp_construct import JSSPEvaluation
@@ -28,13 +34,18 @@ TASK_REGISTRY = {
 }
 
 
-def run_from_config(*, config_path: str, task_family: str) -> None:
-    """从 YAML 启动本地 SFT/LoRA + resident Unsloth EoH-RL。"""
+def run_from_config(*, config_path: str, task_family: str | None = None) -> None:
+    """从 YAML 启动本地 SFT adapter + resident Unsloth EoH-RL。"""
+    raw_cfg_root = _apply_runtime_overrides(_load_yaml_root(config_path))
+    raw_cfg = dict(_require(raw_cfg_root, "eoh_rl"))
+    _validate_config_shape(raw_cfg)
+    cfg = apply_runtime_defaults(raw_cfg)
+    raw_cfg_root = {**raw_cfg_root, "eoh_rl": cfg}
+    task_family = _select_task_family(task_family, cfg)
     if task_family not in TASK_REGISTRY:
         raise ValueError(f"不支持的 task_family: {task_family}")
     spec = TASK_REGISTRY[task_family]
-    raw_cfg_root = _apply_runtime_overrides(_load_yaml_root(config_path))
-    cfg = dict(_require(raw_cfg_root, "eoh_rl"))
+
     task_cfg = dict(_require(cfg, spec["task_key"]))
     evolution_cfg = dict(_require(cfg, "evolution"))
     grpo_cfg = dict(_require(cfg, "grpo"))
@@ -45,6 +56,10 @@ def run_from_config(*, config_path: str, task_family: str) -> None:
     logging_cfg = dict(_require(cfg, "logging"))
     sft_cfg = dict(_require(cfg, "sft"))
     grpo_cfg.setdefault("reward_eval_workers", int(evolution_cfg.get("num_evaluators", 1) or 1))
+    grpo_cfg["prompts_per_update"] = max(
+        int(grpo_cfg.get("prompts_per_update", 1) or 1),
+        int(evolution_cfg.get("num_samplers", 1) or 1),
+    )
     if int(rl_cfg.get("samples_per_prompt", grpo_cfg.get("num_generations", 1))) != int(grpo_cfg.get("num_generations", 1)):
         raise ValueError("rl.samples_per_prompt 必须等于 grpo.num_generations")
 
@@ -58,8 +73,7 @@ def run_from_config(*, config_path: str, task_family: str) -> None:
     run_context = _create_run_context(logging_cfg, spec, allow_existing=bool(rl_cfg.get("checkpoint_auto_resume", True)))
     run_log_dir = run_context["run_log_dir"]
     checkpoint_dir = os.path.join(run_log_dir, "checkpoints")
-    lora_checkpoints_dir = os.path.join(run_log_dir, "lora_checkpoints")
-    for subdir in ("online_grpo", "rl_training", "checkpoints", "lora_checkpoints"):
+    for subdir in ("online_grpo", "rl_training", "checkpoints"):
         os.makedirs(os.path.join(run_log_dir, subdir), exist_ok=True)
     _configure_logging(run_log_dir, spec["logger_name"])
     run_logger = logging.getLogger(spec["logger_name"])
@@ -92,6 +106,7 @@ def run_from_config(*, config_path: str, task_family: str) -> None:
     run_logger.info("规模: %s, 参数: %s", scale_name, task_params)
     run_logger.info("日志目录: %s", run_log_dir)
     run_logger.info("=" * 60)
+
     sft_runtime = run_sft_pipeline(sft_config=sft_cfg, lora_config=lora_cfg, model_path=model_path, training_gpus=training_gpus, logger_override=run_logger)
     logging.getLogger("llm4ad.tools.rl.task_registry").info(
         "加载任务: %s/yaml_task_default -> %s.%s, 参数: %s",
@@ -100,7 +115,13 @@ def run_from_config(*, config_path: str, task_family: str) -> None:
         task.__class__.__name__,
         task_params,
     )
-    manifest.update({"phase1_sft_lora_path": sft_runtime.get("initial_lora_path"), "cold_start_from_base": not bool(sft_runtime.get("initial_lora_path")), "sft_mode": str(sft_runtime.get("mode") or manifest.get("sft_mode") or "cold_start")})
+    manifest.update(
+        {
+            "phase1_sft_lora_path": sft_runtime.get("initial_lora_path"),
+            "cold_start_from_base": not bool(sft_runtime.get("initial_lora_path")),
+            "sft_mode": str(sft_runtime.get("mode") or manifest.get("sft_mode") or "cold_start"),
+        }
+    )
     _write_json(os.path.join(run_log_dir, "config.json"), manifest)
     EoHProfiler.write_run_manifest(run_log_dir, manifest)
 
@@ -109,17 +130,13 @@ def run_from_config(*, config_path: str, task_family: str) -> None:
     policy = ResidentGRPOPolicy(
         model_name_or_path=model_path,
         grpo_config=grpo_cfg,
-        lora_config=lora_cfg,
+        adapter_config=lora_cfg,
         vllm_config=vllm_cfg,
-        lora_checkpoints_dir=lora_checkpoints_dir,
         training_gpus=training_gpus,
-        logger_name=spec["logger_name"],
-        current_lora_path=sft_runtime.get("initial_lora_path"),
+        initial_adapter_path=sft_runtime.get("initial_lora_path"),
         quantization=cfg.get("inference_quantization"),
     )
     llm = ResidentGRPOLLm(policy=policy)
-    if int(_require(evolution_cfg, "num_samplers")) > 1 and not getattr(llm, "thread_safe_batch_draw", False):
-        raise ValueError("resident Unsloth 当前不是线程安全采样器，请把 evolution.num_samplers 设为 1")
 
     method = EoH(
         llm=llm,
@@ -133,10 +150,7 @@ def run_from_config(*, config_path: str, task_family: str) -> None:
         debug_mode=False,
         enable_grpo=bool(_require(rl_cfg, "enabled")),
         samples_per_prompt=int(_require(rl_cfg, "samples_per_prompt")),
-        adaptive_operator_config=dict(_require(cfg, "adaptive_operator")),
-        collapse_config=dict(_require(cfg, "collapse")),
         grpo_config=grpo_cfg,
-        lora_config=lora_cfg,
         reward_fn=reward_fn,
         task_name=task_name,
         checkpoint_dir=checkpoint_dir,
@@ -155,8 +169,22 @@ def run_from_config(*, config_path: str, task_family: str) -> None:
         raise
     finally:
         final_manifest = dict(manifest)
-        final_manifest.update({"status": status, "lora_checkpoints_dir": lora_checkpoints_dir, "runtime_summary": runtime_summary})
+        final_manifest.update({"status": status, "runtime_summary": runtime_summary})
         EoHProfiler.write_run_manifest(run_log_dir, final_manifest)
+
+
+def _select_task_family(task_family: str | None, cfg: dict) -> str:
+    value = task_family or cfg.get("task_family") or cfg.get("problem")
+    if not value:
+        raise ValueError("task_family 不能为空；可由入口脚本传入，或在 YAML 写 task_family/problem")
+    return str(value).strip().lower()
+
+
+def _validate_config_shape(cfg: dict) -> None:
+    runtime_sections = {"grpo", "evolution", "rl", "vllm", "lora", "task_rl_common"}
+    present = sorted(runtime_sections.intersection(cfg))
+    if present:
+        raise ValueError("训练参数不再写入 YAML；请删除这些 section，必要时只通过 eoh_rl.args 覆盖标量: " + ", ".join(present))
 
 
 def _build_task(task_cfg: dict, evolution_cfg: dict, spec: dict):
@@ -225,6 +253,14 @@ def _create_run_context(logging_cfg: dict, spec: dict, *, allow_existing: bool) 
 def _configure_logging(run_log_dir: str, logger_name: str) -> None:
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s", handlers=[logging.FileHandler(os.path.join(run_log_dir, "run.log"), encoding="utf-8"), logging.StreamHandler(sys.stdout)], force=True)
     logging.getLogger(logger_name).setLevel(logging.INFO)
+    os.environ.setdefault("VLLM_LOGGING_LEVEL", "ERROR")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("TORCH_CPP_LOG_LEVEL", "ERROR")
+    os.environ.setdefault("TORCH_DISTRIBUTED_DEBUG", "OFF")
+    warnings.filterwarnings("ignore", message=r".*TRL currently supports vLLM versions.*")
+    warnings.filterwarnings("ignore", message=r".*different tokenizers for different LoRAs.*")
+    for name in ("vllm", "trl", "transformers", "unsloth"):
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 def _write_json(path: str, payload: dict) -> None:
