@@ -122,8 +122,6 @@ class EoHSampler:
         python = self.extract_python_from_response(text)
         if not python:
             return self._failure("missing_function", strategy=strategy)
-        if not strategy:
-            strategy = self._derive_strategy_from_python(python)
 
         if not strict_contract:
             func = self._parse_lenient_function(text)
@@ -218,52 +216,16 @@ class EoHSampler:
 
     @classmethod
     def _trim_lenient_strategy(cls, response: str) -> str | None:
-        text = str(response or "").strip()
-        boxed = cls._extract_braced_idea(text)
-        if boxed:
-            return boxed
-        before_code = re.split(r"```|^\s*def\s+", text, maxsplit=1, flags=re.M)[0].strip()
-        if not before_code:
-            return None
-        sentence = re.split(r"(?<=[.!?])\s+", " ".join(before_code.split()), maxsplit=1)[0]
-        sentence = sentence.strip("` {}[]().;:-")
-        return sentence[:240].strip(" .;:-") or None
-
-    @classmethod
-    def _derive_strategy_from_python(cls, python: str) -> str:
-        """为 code-only 输出生成可用于 EoH 父代提示词的简短算法语义。"""
-        text = str(python or "")
-        lower = text.lower()
-        signals: list[str] = []
-        if "argmin" in lower:
-            signals.append("minimizes a deterministic priority score")
-        if "argmax" in lower:
-            signals.append("maximizes a deterministic priority score")
-        if "destination_node" in lower:
-            signals.append("uses destination distance")
-        if re.search(r"distance_matrix\s*\[\s*current_node", text):
-            signals.append("uses distance from the current node")
-        if re.search(r"distance_matrix\s*\[\s*unvisited_nodes|distance_matrix\s*\[[^\]]*,\s*unvisited_nodes", text):
-            signals.append("compares unvisited-node distances")
-        if any(op in lower for op in ("mean", "sum", "ratio", "sqrt", "log", "exp")):
-            signals.append("combines distance features")
-        if not signals:
-            signals.append("selects the next decision from deterministic input-derived features")
-        unique = []
-        for item in signals:
-            if item not in unique:
-                unique.append(item)
-        return "Code-derived strategy that " + ", ".join(unique[:4]) + "."
+        return cls._extract_braced_idea(response)
 
     @staticmethod
     def _extract_braced_idea(text: str) -> str | None:
         raw = re.split(r"```|^\s*def\s+", str(text or ""), maxsplit=1, flags=re.M)[0]
-        for pattern in (r"\{\{(.*?)\}\}", r"\{(.*?)\}"):
-            match = re.search(pattern, raw, flags=re.S)
-            if match:
-                idea = " ".join(match.group(1).strip().split()).strip("` .;:-")
-                if idea:
-                    return idea
+        match = re.search(r"\{\{(.*?)\}\}", raw, flags=re.S)
+        if match:
+            idea = " ".join(match.group(1).strip().split()).strip("` .;:-")
+            if idea:
+                return idea
         return None
 
     @classmethod

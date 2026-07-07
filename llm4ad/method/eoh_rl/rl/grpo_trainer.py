@@ -96,32 +96,44 @@ def _check_score_metadata_leak(program_str: str) -> bool:
 
 
 @dataclass
-class FourStateRewardConfig:
-    reward_type = "four_state_v1"
+class EoHReward:
     minimize: bool = False
     detect_randomness: bool = True
-    no_code_reward: float = -1.0
-    infeasible_reward: float = -0.5
-    epsilon: float = 1.0e-6
+    reward_parse_fail: float = -1.00
+    reward_exec_fail: float = -0.80
+    reward_none_return: float = -0.60
+    reward_random: float = -0.70
+    reward_leak: float = -0.70
+    epsilon: float = 1.0e-4
+    q3_scale: float = 0.50
 
     def __post_init__(self):
         self.minimize = _bool(self.minimize)
         self.detect_randomness = _bool(self.detect_randomness)
-        self.no_code_reward = float(self.no_code_reward)
-        self.infeasible_reward = float(self.infeasible_reward)
-        self.epsilon = float(self.epsilon)
+
+    def invalid_result(self, label: str, reward: float) -> dict:
+        return {
+            "reward": float(reward), "reward_label": f"invalid_{label}",
+            "reward_quadrant": "invalid", "failure_label": str(label),
+            "beats_parent": False, "beats_frontier": False,
+            "ties_parent": False, "performance_improved": False,
+        }
 
 
-def build_reward_fn_from_task_rl(task_rl: dict, logger=None) -> FourStateRewardConfig:
-    reward_type = str((task_rl or {}).get("reward_type", "four_state_v1")).strip().lower()
-    if reward_type != "four_state_v1":
-        raise ValueError(f"unknown reward_type: {reward_type!r}; supported: four_state_v1")
-    reward = FourStateRewardConfig(**{key: (task_rl or {}).get(key, default) for key, default in {
-        "minimize": False, "detect_randomness": True, "no_code_reward": -1.0, "infeasible_reward": -0.5, "epsilon": 1.0e-6,
+def build_reward_fn_from_task_rl(task_rl: dict, logger=None) -> EoHReward:
+    cfg = task_rl or {}
+    reward = EoHReward(**{key: cfg.get(key, default) for key, default in {
+        "minimize": False, "detect_randomness": True,
+        "reward_parse_fail": -1.00, "reward_exec_fail": -0.80,
+        "reward_none_return": -0.60, "reward_random": -0.70, "reward_leak": -0.70,
+        "epsilon": 1.0e-4, "q3_scale": 0.50,
     }.items()})
     if logger is not None:
-        logger.info("奖励配置: four_state_v1 (minimize=%s, no_code=%.2f, infeasible=%.2f)", reward.minimize, reward.no_code_reward, reward.infeasible_reward)
+        logger.info("奖励配置: eoh_graded_v1 (minimize=%s)", reward.minimize)
     return reward
+
+
+BoundedQuadrantReward = EoHReward
 
 
 def _record(raw: dict) -> dict:
@@ -144,7 +156,7 @@ def _record(raw: dict) -> dict:
         "parent_codes": _as_list(raw.get("parent_codes")),
         "parent_ids": None if raw.get("parent_ids") is None else _as_list(raw.get("parent_ids")),
         "group_size": int(raw.get("group_size") or 1),
-        "reward_contract": str(raw.get("reward_contract") or "four_state_v1"),
+        "reward_contract": str(raw.get("reward_contract") or "bqr_v1"),
     }
 
 
@@ -174,15 +186,13 @@ def is_population_eligible_event(event: dict) -> bool:
 class EoHGRPOReward:
     """Parse, evaluate, and score GRPO completions for one EoH prompt."""
 
-    _PARENT_BASE = 0.15
-
     def __init__(
         self,
         *,
         records: list[dict],
         evaluator,
         template_program,
-        reward_config: FourStateRewardConfig,
+        reward_config: EoHReward,
         tokenizer=None,
         reward_eval_workers: int = 1,
         enable_ast_gate: bool = False,
@@ -193,7 +203,7 @@ class EoHGRPOReward:
         self.reward_config = reward_config
         self.tokenizer = tokenizer
         self.reward_eval_workers = max(1, int(reward_eval_workers or 1))
-        self.__name__ = "eohrl_four_state_reward"
+        self.__name__ = "eohrl_graded_reward"
         self._parser = EoHSampler(None, template_program, enable_ast_gate=enable_ast_gate)
         self._prompt_to_meta = {record["prompt"]: record for record in self.records}
         self._rows: list[dict] = []
@@ -238,7 +248,7 @@ class EoHGRPOReward:
                 pending.append((idx, item))
         for idx, result in self._evaluate_pending(pending):
             rewards[idx] = self._finish(rows[idx], result)
-        final = [float(value if value is not None else self.reward_config.infeasible_reward) for value in rewards]
+        final = [float(value if value is not None else self.reward_config.reward_parse_fail) for value in rewards]
         for row, reward in zip(rows, final):
             row["reward"] = reward
             self.reward_values.append(reward)
@@ -277,9 +287,10 @@ class EoHGRPOReward:
             "parent_improve_count": sum(bool(event.get("beats_parent")) for event in valid),
             "parent_improve_only_count": sum(bool(event.get("beats_parent")) and not bool(event.get("beats_frontier")) for event in valid),
             "frontier_improve_count": sum(bool(event.get("beats_frontier")) for event in valid),
-            "valid_non_improving_count": sum(event.get("reward_state") == "valid_non_improving" for event in valid),
+            "valid_non_improving_count": sum(event.get("reward_quadrant") == "q3" for event in valid),
             "frac_reward_zero_std": zero_std / max(len(groups), 1),
             "reward_stats": _basic_stats(self.reward_values),
+            "reward_tier_stats": self._reward_tier_stats(events),
             "reward_events": events,
             "recent_reward_events": events,
             "candidate_count": len(self._candidates),
@@ -301,12 +312,12 @@ class EoHGRPOReward:
             "blocked_from_population": True,
         }
         if not str(completion or "").strip():
-            row.update(self._failure("no_code_or_function", self.reward_config.no_code_reward, parse_success=False))
+            row.update(self._failure("no_output", parse_success=False))
             return row, None
         parsed = self._parser.parse_response_record(completion, strict_contract=True)
         row.update(strategy=parsed.get("strategy"))
         if parsed.get("failure_label"):
-            row.update(self._failure("no_code_or_function", self.reward_config.no_code_reward, parse_success=False))
+            row.update(self._failure(str(parsed.get("failure_label") or "missing_function"), parse_success=False))
             return row, None
         return row, {"meta": meta, "func": parsed["func"], "program": parsed["program"]}
 
@@ -364,72 +375,77 @@ class EoHGRPOReward:
         row.update(function=str(func), program=program_text, eval_time=result.get("eval_time"), exec_success=False)
         score = _float(result.get("score"))
         if score is None or not math.isfinite(score):
-            row.update(self._failure("exec_failed_or_infeasible", self.reward_config.infeasible_reward, parse_success=True))
-            self._candidates.append({"row": row, "func": func, "program_str": program_text, "score": None, "eval_time": result.get("eval_time"), "diag": result.get("diag"), "meta": meta})
-            return self.reward_config.infeasible_reward
+            # Distinguish runtime exception (-0.80) from logic error / returns None (-0.60)
+            diag = result.get("diag") or {}
+            r = self.reward_config.reward_exec_fail if diag.get("error") else self.reward_config.reward_none_return
+            row.update(self._failure("non_finite_score", parse_success=True, reward=r))
+            self._candidates.append({"row": row, "func": func, "program_str": program_text, "score": None, "eval_time": result.get("eval_time"), "diag": diag, "meta": meta})
+            return r
         random_algo = bool(self.reward_config.detect_randomness and _check_randomness(program_text))
         score_leak = bool(_check_score_metadata_leak(program_text))
         parent_copy = self._is_exact_parent_copy(str(func), meta.get("parent_codes") or [])
         if random_algo or score_leak or parent_copy:
-            row.update(self._failure("exec_failed_or_infeasible", self.reward_config.infeasible_reward, parse_success=True))
+            label = "exact_parent_copy" if parent_copy else "metadata_leak" if score_leak else "randomness_detected"
+            r = self.reward_config.reward_random if random_algo else self.reward_config.reward_leak
+            row.update(self._failure(label, parse_success=True, reward=r))
             row.update(score=score, exec_success=True, random_algo=random_algo, score_metadata_leak=score_leak, exact_parent_copy=parent_copy)
             self._candidates.append({"row": row, "func": func, "program_str": program_text, "score": score, "eval_time": result.get("eval_time"), "diag": result.get("diag"), "meta": meta})
-            return self.reward_config.infeasible_reward
-
-        reward, state, deltas = self._performance_reward(score, meta.get("parent_best_score"), meta.get("population_best_score"))
+            return r
+        perf = self._compute_perf_reward(score, meta.get("parent_best_score"), meta.get("population_best_score"))
         row.update(
-            score=score,
-            reward=reward,
-            reward_state=state,
-            reward_label=state,
-            failure_label=None,
-            validity=True,
+            **perf,
+            reward_state=perf.get("reward_label"),
+            validity=perf.get("failure_label") is None,
             exec_success=True,
             parse_success=True,
             random_algo=False,
             score_metadata_leak=False,
             exact_parent_copy=False,
-            blocked_from_population=False,
-            **deltas,
+            blocked_from_population=perf.get("failure_label") is not None,
         )
         self._candidates.append({"row": row, "func": func, "program_str": program_text, "score": score, "eval_time": result.get("eval_time"), "diag": result.get("diag"), "meta": meta})
-        return reward
+        return float(perf["reward"])
 
-    def _performance_reward(self, score: float, parent_best, frontier_best) -> tuple[float, str, dict]:
-        parent = _float(parent_best, frontier_best)
-        frontier = _float(frontier_best, parent)
-        if parent is None or frontier is None:
-            return self.reward_config.infeasible_reward, "exec_failed_or_infeasible", {"beats_parent": False, "beats_frontier": False}
-        cand_u, parent_u, frontier_u = self._utility(score), self._utility(parent), self._utility(frontier)
-        delta_parent, delta_frontier = cand_u - parent_u, cand_u - frontier_u
-        rel_parent = delta_parent / max(abs(parent_u), self.reward_config.epsilon)
-        rel_frontier = delta_frontier / max(abs(frontier_u), self.reward_config.epsilon)
-        beats_parent = delta_parent > self.reward_config.epsilon
-        beats_frontier = delta_frontier > self.reward_config.epsilon
-        deltas = {
-            "delta_parent": delta_parent,
-            "delta_parent_rel": rel_parent,
-            "delta_frontier": delta_frontier,
-            "delta_frontier_rel": rel_frontier,
-            "beats_parent": bool(beats_parent),
-            "beats_frontier": bool(beats_frontier),
-            "performance_improved": bool(beats_parent or beats_frontier),
+    def _compute_perf_reward(self, score: float, parent_score, frontier_score) -> dict:
+        cfg = self.reward_config
+        utility = lambda v: -float(v) if cfg.minimize else float(v)
+        parent = _float(parent_score, frontier_score)
+        frontier = _float(frontier_score, parent)
+        if parent is None:
+            return {"reward": 0.0, "reward_label": "no_baseline", "reward_quadrant": "q3",
+                    "beats_parent": False, "beats_frontier": False, "ties_parent": True,
+                    "performance_improved": False, "failure_label": None,
+                    "delta_parent": None, "delta_parent_rel": None,
+                    "delta_frontier": None, "delta_frontier_rel": None}
+        u, up, uf = utility(score), utility(parent), utility(frontier)
+        dp, df = u - up, u - uf
+        rp = dp / max(abs(up), cfg.epsilon)
+        rf = df / max(abs(uf), cfg.epsilon)
+        beats_parent = rp > cfg.epsilon
+        beats_frontier = rf > cfg.epsilon
+        ties_parent = abs(rp) <= cfg.epsilon
+        base = {
+            "failure_label": None, "score": score,
+            "delta_parent": dp, "delta_parent_rel": rp,
+            "delta_frontier": df, "delta_frontier_rel": rf,
+            "beats_parent": beats_parent, "beats_frontier": beats_frontier,
+            "ties_parent": ties_parent, "performance_improved": beats_parent or beats_frontier,
         }
         if beats_frontier:
-            return 1.0 + _clip(rel_frontier / 0.02, 0.0, 1.0), "beats_frontier", deltas
+            return {**base, "reward": 1.0 + _clip(rf, 0.0, 1.0),
+                    "reward_label": "q1_frontier", "reward_quadrant": "q1"}
         if beats_parent:
-            return self._PARENT_BASE + _clip(rel_parent / 0.02, 0.0, 0.75), "beats_parent", deltas
-        return -_clip((-rel_parent) / 0.05, 0.02, 0.50), "valid_non_improving", deltas
+            return {**base, "reward": 0.3 + _clip(rp, 0.0, 0.7),
+                    "reward_label": "q1_parent", "reward_quadrant": "q1"}
+        return {**base, "reward": _clip(rp, -1.0, 0.0) * cfg.q3_scale,
+                "reward_label": "q3_continuous", "reward_quadrant": "q3"}
 
-    def _utility(self, score: float) -> float:
-        return -float(score) if self.reward_config.minimize else float(score)
-
-    @staticmethod
-    def _failure(label: str, reward: float, *, parse_success: bool) -> dict:
+    def _failure(self, label: str, *, parse_success: bool, reward: float | None = None) -> dict:
+        r = reward if reward is not None else self.reward_config.reward_parse_fail
+        result = self.reward_config.invalid_result(label, r)
         return {
-            "reward": float(reward),
-            "reward_state": label,
-            "reward_label": label,
+            **result,
+            "reward_state": result["reward_label"],
             "failure_label": label,
             "validity": False,
             "parse_success": bool(parse_success),
@@ -444,9 +460,26 @@ class EoHGRPOReward:
 
     @staticmethod
     def _event(row: dict) -> dict:
-        event = {key: row.get(key) for key in "prompt_id operator_type parent_ids parent_best_score population_best_score completion_index sample_order score reward reward_state reward_label delta_parent delta_parent_rel delta_frontier delta_frontier_rel strategy function failure_label input_tokens output_tokens tokens_total".split()}
-        event.update({key: bool(row.get(key, False)) for key in "validity parse_success exec_success beats_parent beats_frontier performance_improved exact_parent_copy random_algo score_metadata_leak registered_to_population survived_main_population blocked_from_population".split()})
+        event = {key: row.get(key) for key in "prompt_id operator_type parent_ids parent_best_score population_best_score completion_index sample_order score reward reward_state reward_label reward_quadrant delta_parent delta_parent_rel delta_frontier delta_frontier_rel strategy function failure_label input_tokens output_tokens tokens_total".split()}
+        event.update({key: bool(row.get(key, False)) for key in "validity parse_success exec_success beats_parent beats_frontier ties_parent performance_improved exact_parent_copy random_algo score_metadata_leak registered_to_population survived_main_population blocked_from_population".split()})
         return event
+
+    @staticmethod
+    def _reward_tier_stats(events: list[dict]) -> dict:
+        counts: dict[str, int] = {}
+        for event in events:
+            label = str(event.get("reward_label") or "unknown")
+            counts[label] = counts.get(label, 0) + 1
+        q1_frontier = counts.get("q1_frontier", 0)
+        q1_parent = counts.get("q1_parent", 0)
+        q1_total = q1_frontier + q1_parent
+        return {
+            "counts": counts,
+            "q1_frontier_count": q1_frontier,
+            "q1_parent_count": q1_parent,
+            "q1_total_count": q1_total,
+            "strong_progress_count": q1_total,
+        }
 
     def _resolve_meta(self, prompt: str) -> dict:
         if prompt in self._prompt_to_meta:
@@ -571,8 +604,10 @@ class ResidentGRPOPolicy:
         self._training_gpus = list(training_gpus or [])
         self._quantization = quantization or self.config.get("quantization", "4bit")
         self._adapter_path = self._normalize_adapter_path(initial_adapter_path)
+        self._inference_lora_name = "grpo_trainer_lora_model"
         self._inference_lora_request = None
-        self._synced_adapter_path = None
+        self._synced_lora_name = None
+        self._latest_saved_adapter_path = self._adapter_path
         self._model = self._tokenizer = self._fast_language_model_cls = None
         self._inference_prepared = False
         self._require_config()
@@ -630,9 +665,7 @@ class ResidentGRPOPolicy:
             if not self._finite(summary, metrics):
                 raise RuntimeError("GRPO produced non-finite loss or reward stats")
             current_lora_path = self._save_current_adapter(update_dir)
-            skip_lora_sync = float(summary.get("frac_reward_zero_std", 0.0) or 0.0) >= 1.0
-            if not skip_lora_sync:
-                self.prepare_for_inference(force_reload=True)
+            self.prepare_for_inference(force_reload=True)
         except Exception as exc:
             summary = callback.summary()
             logger.warning("[EoHRLGRPO] update=%d failed: %s", int(update_id), exc)
@@ -666,14 +699,13 @@ class ResidentGRPOPolicy:
             num_prompts=len(records),
             num_generations=int(self.config.get("num_generations", 4) or 4),
             current_lora_path=current_lora_path,
-            skipped_lora_sync_zero_std=skip_lora_sync,
         )
         return {"executed": True, "metrics": metrics, "reward_summary": summary, "recent_reward_events": summary.get("recent_reward_events", []), "candidates": callback.candidates()}
 
     def prepare_for_inference(self, *, force_reload: bool = False):
         if force_reload:
             self._inference_lora_request = None
-            self._synced_adapter_path = None
+            self._synced_lora_name = None
             self._inference_prepared = False
         if not self._inference_prepared and self._fast_language_model_cls is not None:
             self._fast_language_model_cls.for_inference(self._model)
@@ -688,7 +720,7 @@ class ResidentGRPOPolicy:
         except Exception:
             pass
         self._inference_lora_request = None
-        self._synced_adapter_path = None
+        self._synced_lora_name = None
         self._model = self._tokenizer = None
         gc.collect()
         if torch.cuda.is_available():
@@ -831,31 +863,32 @@ class ResidentGRPOPolicy:
         return os.path.abspath(path)
 
     def _save_current_adapter(self, update_dir: str) -> str:
-        if self._adapter_path:
-            return self._adapter_path
-        path = os.path.abspath(os.path.join(os.path.dirname(update_dir), "runtime_lora_config"))
+        del update_dir
+        return self._inference_lora_name
+
+    def export_current_adapter(self, path: str) -> str:
+        path = os.path.abspath(path)
         if os.path.exists(path):
             shutil.rmtree(path)
-        self._model.peft_config["default"].save_pretrained(path)
-        self._adapter_path = path
-        logger.info("[EoHRLGRPO] prepared runtime LoRA config: %s", path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._model.save_pretrained(path)
+        self._latest_saved_adapter_path = path
+        logger.info("[EoHRLGRPO] saved adapter path=%s", path)
         return path
 
     def _sync_lora_to_inference(self):
-        if not self._adapter_path:
-            return None
-        path = os.path.abspath(self._adapter_path)
-        if self._synced_adapter_path == path and self._inference_lora_request is not None:
+        name = self._inference_lora_name
+        if self._synced_lora_name == name and self._inference_lora_request is not None:
             return self._inference_lora_request
         started = time.time()
         if not hasattr(self._model, "load_lora"):
             raise RuntimeError("Unsloth fast inference model does not expose load_lora; vLLM LoRA sync is unavailable")
-        request = self._model.load_lora(path, load_tensors=True)
+        request = self._model.load_lora(name, load_tensors=True)
         if request is None:
             raise RuntimeError("load_lora(load_tensors=True) did not return a LoRARequest")
         self._inference_lora_request = request
-        self._synced_adapter_path = path
-        logger.info("[EoHRLGRPO] sync_lora_to_inference path=%s elapsed=%.3fs", path, time.time() - started)
+        self._synced_lora_name = name
+        logger.info("[EoHRLGRPO] sync_lora_to_inference name=%s elapsed=%.3fs", name, time.time() - started)
         return request
 
     def _require_config(self) -> None:
@@ -912,4 +945,4 @@ class ResidentGRPOLLm(LLM):
         self.model_manager.close()
 
 
-__all__ = ["FourStateRewardConfig", "ResidentGRPOPolicy", "ResidentGRPOLLm", "_check_randomness", "_check_score_metadata_leak", "build_reward_fn_from_task_rl", "is_population_eligible_event"]
+__all__ = ["BoundedQuadrantReward", "ResidentGRPOPolicy", "ResidentGRPOLLm", "_check_randomness", "_check_score_metadata_leak", "build_reward_fn_from_task_rl", "is_population_eligible_event"]

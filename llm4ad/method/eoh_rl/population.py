@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import math
 from typing import Iterable, List
 
@@ -8,11 +9,50 @@ import numpy as np
 from ...base import Function
 
 
-class Population:
-    """EoH-style two-zone population.
+def _ast_signature(code) -> dict[str, float]:
+    try:
+        tree = ast.parse(str(code))
+    except Exception:
+        return {}
+    sig: dict[str, float] = {}
 
-    `_population` is the active parent pool. New candidates are accumulated in
-    `_next_gen_pop` and only affect parent selection after `survival()`.
+    def add(key: str, weight: float = 1.0):
+        sig[key] = sig.get(key, 0.0) + weight
+
+    def call_name(node) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            base = call_name(node.value)
+            return f"{base}.{node.attr}" if base else node.attr
+        return ""
+
+    for parent in ast.walk(tree):
+        add(type(parent).__name__)
+        if isinstance(parent, ast.Call):
+            name = call_name(parent.func)
+            if name:
+                add(f"call:{name}", 0.5)
+        for child in ast.iter_child_nodes(parent):
+            add(f"{type(parent).__name__}->{type(child).__name__}", 0.5)
+    return sig
+
+
+def ast_distance(left, right) -> float:
+    a, b = _ast_signature(left), _ast_signature(right)
+    if not a or not b:
+        return 0.0
+    keys = set(a) | set(b)
+    dot = sum(a.get(k, 0.0) * b.get(k, 0.0) for k in keys)
+    norm = math.sqrt(sum(v * v for v in a.values())) * math.sqrt(sum(v * v for v in b.values()))
+    return 0.0 if norm == 0.0 else max(0.0, min(1.0, 1.0 - dot / norm))
+
+
+class Population:
+    """CALM-style single population.
+
+    `_population` is the full archive of valid, code-unique algorithms. Parent
+    selection uses only the top `pop_size` members after score sorting.
     """
 
     def __init__(
@@ -21,93 +61,81 @@ class Population:
         generation: int = 0,
         pop: List[Function] | "Population" | None = None,
         *,
-        next_gen_pop: List[Function] | None = None,
         minimize: bool = False,
     ):
         self._pop_size = int(pop_size)
         self._generation = int(generation)
         self._minimize = bool(minimize)
         self._population = list(pop._population if isinstance(pop, Population) else (pop or []))
-        self._next_gen_pop = list(next_gen_pop or [])
         self._population = self._deduplicate(self._population)
         self._sort_in_place(self._population)
-        self._population = self._population[: self._pop_size]
 
     def __len__(self) -> int:
-        return len(self._population)
+        return len(self.active_population)
 
     def __getitem__(self, item) -> Function:
-        return self._population[item]
+        return self.active_population[item]
 
     @property
     def population(self) -> list[Function]:
         return self._population
 
     @property
-    def next_generation(self) -> list[Function]:
-        return self._next_gen_pop
+    def active_population(self) -> list[Function]:
+        return self._population[: self._pop_size]
 
     @property
     def generation(self) -> int:
         return self._generation
 
     @property
-    def next_generation_size(self) -> int:
-        return len(self._next_gen_pop)
+    def archive_size(self) -> int:
+        return len(self._population)
 
     def add_initial_member(self, func: Function) -> tuple[bool, bool]:
-        if not self._has_finite_score(func) or self.has_duplicate_function(func):
+        if not self._add(func):
             return False, False
-        if len(self._population) >= self._pop_size:
-            return False, False
-        self._population.append(func)
-        self._sort_in_place(self._population)
-        return True, len(self._population) >= self._pop_size
+        return True, len(self.active_population) >= self._pop_size
 
     def register_evolved_function(self, func: Function) -> tuple[bool, bool, list[Function]]:
-        if not self._has_finite_score(func) or self.has_duplicate_function(func):
+        before = list(self.active_population)
+        if not self._add(func):
             return False, False, []
-        self._next_gen_pop.append(func)
-        if len(self._next_gen_pop) < self._pop_size:
-            return True, False, []
-        evicted = self.survival()
-        return True, True, evicted
-
-    def survival(self) -> list[Function]:
-        before = list(self._population)
-        combined = self._deduplicate([*self._population, *self._next_gen_pop])
-        self._sort_in_place(combined)
-        self._population = combined[: self._pop_size]
-        self._next_gen_pop = []
         self._generation += 1
-        return [old for old in before if all(old is not cur for cur in self._population)]
+        active = self.active_population
+        survived = any(func is cur for cur in active)
+        evicted = [old for old in before if all(old is not cur for cur in active)]
+        return True, survived, evicted
 
     def replace_population(self, members: Iterable[Function]) -> None:
         self._population = self._deduplicate([func for func in members if self._has_finite_score(func)])
         self._sort_in_place(self._population)
-        self._population = self._population[: self._pop_size]
-        self._next_gen_pop = []
 
     def has_duplicate_function(self, func: str | Function) -> bool:
-        return any(self._same_member(existing, func) for existing in [*self._population, *self._next_gen_pop])
+        return any(self._same_member(existing, func) for existing in self._population)
 
     def selection(self) -> Function:
-        funcs = [func for func in self._population if self._has_finite_score(func)]
+        funcs = [func for func in self.active_population if self._has_finite_score(func)]
         if not funcs:
             raise RuntimeError("EoH-RL parent selection requires a non-empty active population")
-        self._sort_in_place(funcs)
-        n = len(funcs)
-        probs = np.empty(n, dtype=float)
-        rank = 0
-        while rank < n:
-            end = rank + 1
-            score = self._utility(funcs[rank].score)
-            while end < n and self._utility(funcs[end].score) == score:
-                end += 1
-            probs[rank:end] = sum(1.0 / (r + n) for r in range(rank, end)) / (end - rank)
-            rank = end
-        probs = probs / probs.sum()
+        rank = 1 + np.arange(len(funcs), dtype=float)
+        probs = (1.0 / rank) / np.sum(1.0 / rank)
         return np.random.choice(funcs, p=probs)
+
+    def crossover_selection(self) -> list[Function]:
+        parent1 = self.active_population[0]
+        candidates = [func for func in self._population if func is not parent1 and self._has_finite_score(func)]
+        if not candidates:
+            raise RuntimeError("EoH-RL crossover requires two distinct parents")
+        parent2 = max(candidates, key=lambda func: ast_distance(parent1, func))
+        return [parent1, parent2]
+
+    def _add(self, func: Function) -> bool:
+        if not self._has_finite_score(func) or self.has_duplicate_function(func):
+            return False
+        self._population.append(func)
+        self._sort_in_place(self._population)
+        return True
 
     def _deduplicate(self, funcs: list[Function]) -> list[Function]:
         unique: list[Function] = []

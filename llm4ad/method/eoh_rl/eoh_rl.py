@@ -45,7 +45,7 @@ def operator_stats(events: list[dict]) -> dict:
             "parent_improve_count": count("beats_parent", valid),
             "parent_improve_only_count": sum(bool(row.get("beats_parent")) and not bool(row.get("beats_frontier")) for row in valid),
             "frontier_improve_count": count("beats_frontier", valid),
-            "valid_non_improving_count": sum(row.get("reward_state") == "valid_non_improving" for row in valid),
+            "valid_non_improving_count": sum(row.get("reward_quadrant") == "q3" for row in valid),
             "frac_reward_zero_std": float(len(rewards) > 1 and len(set(rewards)) == 1),
             "registered_to_population_count": count("registered_to_population"),
         }
@@ -109,7 +109,7 @@ def _deserialize_functions(rows: list[dict]) -> list[Function]:
 class EoH:
     """EoH search with GRPO embedded as the trainable sampler.
 
-    EoH owns population, parents, operator order, evaluation, and survival.
+    EoH owns population, parents, operator order, and evaluation.
     GRPO owns only one update over one EoH prompt and returns candidate events.
     """
 
@@ -121,7 +121,6 @@ class EoH:
         max_generations: Optional[int] = 10,
         max_sample_nums: Optional[int] = 100,
         pop_size: Optional[int] = 5,
-        selection_num=2,
         use_e2_operator: bool = True,
         use_m1_operator: bool = True,
         use_m2_operator: bool = True,
@@ -149,7 +148,6 @@ class EoH:
         self._max_grpo_updates = None if max_generations is None else int(max_generations)
         self._max_sample_nums = None if max_sample_nums is None else int(max_sample_nums)
         self._pop_size = 10 if pop_size is None else int(pop_size)
-        self._selection_num = int(selection_num)
         self._operator_cycle = self._build_operator_cycle(use_e2_operator, use_m1_operator, use_m2_operator)
 
         cfg = dict(kwargs)
@@ -170,8 +168,6 @@ class EoH:
 
         if self._samples_per_prompt != int(self._grpo_config.get("num_generations", self._samples_per_prompt) or self._samples_per_prompt):
             raise ValueError("samples_per_prompt must match grpo.num_generations for the minimal GRPO loop")
-        if self._selection_num < 2 and any(op in {"e1", "e2"} for op in self._operator_cycle):
-            raise ValueError("selection_num >= 2 is required for e1/e2")
         if not getattr(llm, "has_batch_draw", False):
             raise ValueError("EoH-RL requires an LLM with batch draw support")
 
@@ -188,6 +184,8 @@ class EoH:
         self._initial_sample_nums_max = self._max_sample_nums if self._max_sample_nums is not None else 2 * self._pop_size
         self._reward_events: list[dict] = []
         self._best_curve: list[dict] = []
+        self._latest_saved_lora_path: str | None = None
+        self._final_saved_lora_path: str | None = None
         self._token_usage_totals = {
             "input_tokens_total": 0,
             "unique_input_tokens_total": 0,
@@ -239,7 +237,7 @@ class EoH:
     def _best_population_score(self):
         candidates = [
             func
-            for func in [*self._population.population, *self._population.next_generation]
+            for func in self._population.population
             if getattr(func, "score", None) is not None and math.isfinite(float(func.score))
         ]
         if not candidates:
@@ -256,10 +254,13 @@ class EoH:
         return self._operator_cycle[(int(update_id) - 1 + int(prompt_offset)) % len(self._operator_cycle)]
 
     def _select_parents(self, op: str) -> list[Function]:
-        count = self._selection_num if op in {"e1", "e2"} else 1
-        if len(self._population) < count:
-            raise RuntimeError(f"not enough active parents for {op}: need={count}, have={len(self._population)}")
-        return [self._population.selection() for _ in range(count)]
+        if op in {"e1", "e2"}:
+            if self._population.archive_size < 2:
+                raise RuntimeError(f"not enough parents for {op}: need=2, have={self._population.archive_size}")
+            return self._population.crossover_selection()
+        if len(self._population) < 1:
+            raise RuntimeError(f"not enough active parents for {op}: need=1, have={len(self._population)}")
+        return [self._population.selection()]
 
     def _parent_ids_for_samples(self, parents: list[Function]) -> list[int]:
         ids = []
@@ -292,7 +293,7 @@ class EoH:
             parent_ids=self._parent_ids_for_samples(parents),
             population_best_score=self._best_population_score(),
             group_size=int(self._samples_per_prompt),
-            reward_contract="four_state_v1",
+            reward_contract="bqr_v1",
             system_prompt=EoHPrompt.get_system_prompt(),
         )
 
@@ -398,6 +399,8 @@ class EoH:
             bool(row.get("exact_parent_copy"))
             or bool(row.get("random_algo"))
             or bool(row.get("score_metadata_leak"))
+            or not bool(row.get("validity", True))
+            or bool(row.get("failure_label"))
             or _check_score_metadata_leak(program_str)
             or (getattr(self._reward_fn, "detect_randomness", True) and _check_randomness(program_str))
         )
@@ -479,7 +482,7 @@ class EoH:
     def _mark_events_after_registration(self, events: list[dict], candidates: list[dict]) -> None:
         by_index = {int((item.get("row") or {}).get("completion_index")): item.get("row") or {} for item in candidates if (item.get("row") or {}).get("completion_index") is not None}
         by_function = {str((item.get("row") or {}).get("function") or ""): item.get("row") or {} for item in candidates}
-        active_codes = {str(func) for func in self._population.population}
+        active_codes = {str(func) for func in self._population.active_population}
         for event in events or []:
             row = by_index.get(int(event.get("completion_index") or 0)) or by_function.get(str(event.get("function") or ""))
             if row:
@@ -551,7 +554,7 @@ class EoH:
             operator_types=operator_types,
             population_generation=self._population.generation,
             active_population_size=len(self._population),
-            next_generation_size=self._population.next_generation_size,
+            archive_size=self._population.archive_size,
             total_sample_nums=self._tot_sample_nums,
             best_before_rl=best_before,
             best_after_rl=best_after,
@@ -563,6 +566,10 @@ class EoH:
             operator_stats=operator_stats(events),
             reward_summary={**summary, "reward_events": events, "operator_stats": operator_stats(events), "token_usage": token_usage, "timing": dict(summary.get("timing") or {})},
         )
+        if update_id % 100 == 0:
+            saved = self._save_lora_artifact(f"lora_update_{update_id:03d}")
+            if saved:
+                metrics["saved_lora_path"] = saved
         self._best_curve.append({"rl_update_id": update_id, "population_generation": self._population.generation, "best": best_after})
         self._save_rl_update_metrics(update_id, metrics)
         self._save_checkpoint(tag=f"rl_{update_id:03d}")
@@ -571,7 +578,8 @@ class EoH:
             "[EoHRL:grpo] "
             f"update={update_id} "
             f"gen={self._population.generation} "
-            f"next={self._population.next_generation_size}/{self._pop_size} "
+            f"pop={self._population.archive_size} "
+            f"active={len(self._population)}/{self._pop_size} "
             f"op={operator_summary} "
             f"rollouts={total} "
             f"valid={summary.get('valid_count', 0)} "
@@ -631,8 +639,9 @@ class EoH:
             "tot_sample_nums": self._tot_sample_nums,
             "rl_update_count": self._grpo_update_count,
             "population": [_serialize_function(func) for func in self._population.population],
-            "next_generation": [_serialize_function(func) for func in self._population.next_generation],
             "best_curve": list(self._best_curve),
+            "latest_saved_lora_path": self._latest_saved_lora_path,
+            "final_saved_lora_path": self._final_saved_lora_path,
             "token_usage_totals": dict(self._token_usage_totals),
             "timing_totals": dict(self._timing_totals),
         }
@@ -650,12 +659,13 @@ class EoH:
             pop_size=self._pop_size,
             generation=int(state.get("population_generation", 0) or 0),
             pop=_deserialize_functions(state.get("population", [])),
-            next_gen_pop=_deserialize_functions(state.get("next_generation", [])),
             minimize=self._minimize(),
         )
         self._tot_sample_nums = int(state.get("tot_sample_nums", 0) or 0)
         self._grpo_update_count = int(state.get("rl_update_count", 0) or 0)
         self._best_curve = list(state.get("best_curve") or [])
+        self._latest_saved_lora_path = state.get("latest_saved_lora_path") or None
+        self._final_saved_lora_path = state.get("final_saved_lora_path") or None
         self._token_usage_totals.update(dict(state.get("token_usage_totals") or {}))
         self._timing_totals.update(dict(state.get("timing_totals") or {}))
 
@@ -665,13 +675,23 @@ class EoH:
             "population_generation": self._population.generation,
             "total_sample_nums": self._tot_sample_nums,
             "active_population_size": len(self._population),
-            "next_generation_size": self._population.next_generation_size,
+            "archive_size": self._population.archive_size,
             "best_score": self._best_population_score(),
             "operator_cycle": list(self._operator_cycle),
             "samples_per_prompt": self._samples_per_prompt,
+            "latest_saved_lora_path": self._latest_saved_lora_path,
+            "final_saved_lora_path": self._final_saved_lora_path,
             "token_usage_totals": dict(self._token_usage_totals),
             "timing_totals": dict(self._timing_totals),
         }
+
+    def _save_lora_artifact(self, name: str) -> str | None:
+        manager = getattr(self._llm, "model_manager", None)
+        if manager is None or not hasattr(manager, "export_current_adapter"):
+            return None
+        path = manager.export_current_adapter(os.path.join(self._checkpoint_dir, name))
+        self._latest_saved_lora_path = path
+        return path
 
     def _write_run_summary(self) -> None:
         path = os.path.join(self._default_log_dir(), "run_summary.json")
@@ -702,6 +722,7 @@ class EoH:
                     logger.exception("[EoHRL] GRPO update failed; stopping to protect search state")
                     break
             self._finalize_run_timing(run_started)
+            self._final_saved_lora_path = self._save_lora_artifact("lora_final")
             self._save_checkpoint(tag="latest_finish")
             self._write_run_summary()
             logger.info(

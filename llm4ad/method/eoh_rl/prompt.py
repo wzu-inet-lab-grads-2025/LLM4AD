@@ -33,7 +33,7 @@ class EoHPrompt:
         parent_ids: List[int] | None = None,
         population_best_score: float | None = None,
         group_size: int = 1,
-        reward_contract: str = "four_state_v1",
+        reward_contract: str = "bqr_v1",
         system_prompt: str | None = None,
     ) -> Dict:
         user_prompt = str(prompt or "").strip()
@@ -58,7 +58,7 @@ class EoHPrompt:
             "parent_ids": None if parent_ids is None else list(parent_ids),
             "population_best_score": population_best_score,
             "group_size": int(group_size),
-            "reward_contract": str(reward_contract or "four_state_v1"),
+            "reward_contract": str(reward_contract or "bqr_v1"),
         }
 
     @staticmethod
@@ -120,9 +120,14 @@ class EoHPrompt:
     def _output_requirements(cls, template_function: Function) -> str:
         temp_func = cls._empty_template_function(template_function)
         return (
-            "Implement the following Python function:\n"
-            f"{str(temp_func)}\n"
-            "Return a single Python code block. Avoid extra explanations, long comments, and unnecessary blank lines."
+            "Return exactly two parts:\n\n"
+            "{{The idea of the algorithm is to <one concise sentence describing the deterministic decision rule>.}}\n\n"
+            "```python\n"
+            f"{str(temp_func).strip()}\n"
+            "```\n\n"
+            "Do not include any other text. The code block must contain exactly one complete implementation of the required function. "
+            "The algorithm must be deterministic. Do not use randomness, time, external state, hidden evaluation information, or unavailable imports. "
+            "Keep the implementation concise and focused on the main ranking, priority, or selection rule."
         )
 
     @classmethod
@@ -145,8 +150,9 @@ class EoHPrompt:
             f"{task_prompt.strip()}\n"
             f"I have {len(indivs)} existing algorithms with their descriptions and codes as follows:\n"
             f"{cls._format_parents(indivs)}\n"
-            "Please generate a new deterministic algorithm that is motivated by the following algorithms and may perform better on the same input.\n"
-            "Prefer combining useful components from different parent algorithms instead of making only a very small edit of one parent.\n"
+            "Please generate a new deterministic algorithm motivated by the following parent algorithms.\n"
+            "Use the strongest parent as the performance anchor, and borrow one structurally different decision idea from the other parent.\n"
+            "The child should combine useful components from both parents and produce a meaningfully different ranking, priority, or selection behavior, rather than being a tiny edit of either parent.\n"
             f"{cls._CONCISE_CODE_RULE}\n"
             f"{cls._output_requirements(template_function)}"
         )
@@ -159,8 +165,9 @@ class EoHPrompt:
             f"{task_prompt.strip()}\n"
             f"I have {len(indivs)} existing algorithms with their descriptions and codes as follows:\n"
             f"{cls._format_parents(indivs)}\n"
-            "Please generate a new deterministic algorithm that is motivated by the following algorithms and may perform better on the same input.\n"
-            "You may first identify the strongest common backbone among them, and then revise one important fragment so the child is not only a tiny edit of a single parent.\n"
+            "Please generate a new deterministic algorithm motivated by the following parent algorithms.\n"
+            "Keep the strongest reliable backbone among the parents, then replace or redesign one important decision fragment using a structurally different idea from the other parent.\n"
+            "The child should preserve the useful core behavior while changing one key ranking, priority, or selection mechanism.\n"
             f"{cls._CONCISE_CODE_RULE}\n"
             f"{cls._output_requirements(template_function)}"
         )
@@ -172,8 +179,8 @@ class EoHPrompt:
             f"{task_prompt.strip()}\n"
             "I have one algorithm with its code as follows.\n"
             f"{cls._format_parent(1, indi)}\n"
-            "Please modify this algorithm by introducing one new meaningful deterministic component into its main ranking, priority, or selection rule.\n"
-            "Try to make the resulting decision behavior meaningfully different on the same input, rather than only making a very small cosmetic change.\n"
+            "Please modify this algorithm by injecting one new deterministic component into its main ranking, priority, or selection rule.\n"
+            "The added component should be derived from the current inputs and should introduce a meaningful new signal or interaction, not just a constant tweak or cosmetic edit.\n"
             f"{cls._CONCISE_CODE_RULE}\n"
             f"{cls._output_requirements(template_function)}"
         )
@@ -185,8 +192,8 @@ class EoHPrompt:
             f"{task_prompt.strip()}\n"
             "I have one algorithm with its code as follows.\n"
             f"{cls._format_parent(1, indi)}\n"
-            "Please identify one weak, rigid, or poorly differentiated fragment in the algorithm and replace it with a different deterministic rule derived from the current inputs.\n"
-            "Try to change the main ranking, priority, or selection behavior instead of only adjusting a parameter or a superficial tie-breaker.\n"
+            "Please identify one weak, rigid, overly simple, or poorly differentiated fragment in the algorithm and replace it with a different deterministic rule.\n"
+            "The replacement should be input-derived and should change the main decision behavior while keeping the implementation concise.\n"
             f"{cls._CONCISE_CODE_RULE}\n"
             f"{cls._output_requirements(template_function)}"
         )

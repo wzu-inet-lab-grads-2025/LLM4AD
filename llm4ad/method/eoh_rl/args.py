@@ -19,7 +19,7 @@ class EoHRLArgs:
     max_completion_length: int = 1000
     lora_rank: int = 32
     lr: float = 5.0e-5
-    beta: float = 0.0
+    beta: float = 0.04
     epsilon: float = 0.15
     seed: int = 42
 
@@ -29,8 +29,7 @@ class EoHRLArgs:
     vllm_group_port: int = 51215
     quiet_training_output: bool = False
 
-    no_code_reward: float = -1.0
-    infeasible_reward: float = -0.5
+    invalid_reward: float = -1.0
     detect_randomness: bool = True
 
     @classmethod
@@ -86,12 +85,16 @@ def apply_runtime_defaults(cfg: dict) -> dict:
     )
     cfg["task_rl_common"] = _merge(
         {
-            "reward_type": "four_state_v1",
+            "reward_type": "eoh_graded_v1",
             "minimize": False,
             "detect_randomness": args.detect_randomness,
-            "no_code_reward": args.no_code_reward,
-            "infeasible_reward": args.infeasible_reward,
-            "epsilon": 1.0e-6,
+            "reward_parse_fail": -1.00,
+            "reward_exec_fail": -0.80,
+            "reward_none_return": -0.60,
+            "reward_random": -0.70,
+            "reward_leak": -0.70,
+            "epsilon": 1.0e-4,
+            "q3_scale": 0.50,
         },
         cfg.get("task_rl_common"),
     )

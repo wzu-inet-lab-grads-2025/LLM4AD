@@ -3,8 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export TARGET_GPU="${TARGET_GPU:-2}"
-export TARGET_PORT="${TARGET_PORT:-22003}"
+export TARGET_GPU="${TARGET_GPU:-1}"
+export TARGET_PORT="${TARGET_PORT:-22002}"
 export TARGET_GROUP_PORT="${TARGET_GROUP_PORT:-51215}"
 export TSP_SCALE="${TSP_SCALE:-medium-200}"
 export TSP_LABEL="${TSP_LABEL:-200}"
