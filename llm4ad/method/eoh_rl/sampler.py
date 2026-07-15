@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import logging
 import re
-from typing import Dict, Optional
+from typing import Optional
 
 from ...base import Function, LLM, Program, SampleTrimmer, TextFunctionProgramConverter
 from .rl.sft_data import validate_generated_code
@@ -28,21 +28,14 @@ class EoHSampler:
         )
         self._template_function = self._template_program_obj.functions[0] if self._template_program_obj else None
         self._enable_ast_gate = bool(enable_ast_gate)
-        self._ast_gate_reject_counts: Dict[str, int] = {}
 
-    def get_strategy_and_function_records_batch(
-        self,
-        prompt: str,
-        n: int,
-        *,
-        strict_contract: bool = True,
-    ) -> list[dict]:
+    def get_strategy_and_function_records_batch(self, prompt: str, n: int) -> list[dict]:
         if n <= 0:
             return []
         responses = self._draw_batch_responses(prompt, n)
         records: list[dict] = []
         for response in responses[:n]:
-            parsed = self.parse_response_record(response, strict_contract=strict_contract)
+            parsed = self.parse_response_record(response)
             parsed["raw_response"] = response
             records.append(parsed)
         return records
@@ -104,13 +97,9 @@ class EoHSampler:
             return None
         python = self.extract_python_from_response(response)
         result = validate_generated_code(python, template_program=str(self._template_program))
-        if result.ok:
-            return None
-        reason = str(result.reason or "ast_gate_rejected")
-        self._ast_gate_reject_counts[reason] = self._ast_gate_reject_counts.get(reason, 0) + 1
-        return reason
+        return None if result.ok else str(result.reason or "ast_gate_rejected")
 
-    def parse_response_record(self, response: str, *, strict_contract: bool = True) -> dict:
+    def parse_response_record(self, response: str) -> dict:
         text = str(response or "").strip()
         if not text:
             return self._failure("no_output")
@@ -123,26 +112,13 @@ class EoHSampler:
         if not python:
             return self._failure("missing_function", strategy=strategy)
 
-        if not strict_contract:
-            func = self._parse_lenient_function(text)
-            program = None
-            if func is not None:
-                program = TextFunctionProgramConverter.function_to_program(func, self._template_program_obj or self._template_program)
-            return {
-                "failure_label": None if func is not None else "missing_function",
-                "strategy": strategy,
-                "python": python,
-                "func": func,
-                "program": program,
-            }
-
-        return self._parse_strict_record(strategy, python)
+        return self._parse_record(strategy, python)
 
     @classmethod
     def trim_strategy_from_response(cls, response: str) -> str | None:
-        return cls._trim_lenient_strategy(response)
+        return cls._extract_braced_idea(response)
 
-    def _parse_strict_record(self, strategy: str | None, python: str) -> dict:
+    def _parse_record(self, strategy: str | None, python: str) -> dict:
         try:
             tree = ast.parse(python)
         except SyntaxError:
@@ -195,16 +171,6 @@ class EoHSampler:
             "program": program,
         }
 
-    def _parse_lenient_function(self, response: str) -> Function | None:
-        for snippet in self._candidate_code_snippets(response):
-            func = self._function_from_full_snippet(snippet)
-            if func is not None and self._matches_template_function(func):
-                return func
-            func = self._function_from_body_snippet(snippet)
-            if func is not None and self._matches_template_function(func):
-                return func
-        return None
-
     def _matches_template_function(self, func: Function | None) -> bool:
         if func is None or self._template_function is None:
             return False
@@ -213,10 +179,6 @@ class EoHSampler:
         if func.args != self._template_function.args:
             return False
         return (func.return_type or "") == (self._template_function.return_type or "")
-
-    @classmethod
-    def _trim_lenient_strategy(cls, response: str) -> str | None:
-        return cls._extract_braced_idea(response)
 
     @staticmethod
     def _extract_braced_idea(text: str) -> str | None:
@@ -227,59 +189,6 @@ class EoHSampler:
             if idea:
                 return idea
         return None
-
-    @classmethod
-    def _candidate_code_snippets(cls, response: str) -> list[str]:
-        text = str(response or "")
-        snippets: list[str] = []
-        for block in re.finditer(r"```(?:python|py)?\s*\n(.*?)```", text, flags=re.I | re.S):
-            snippet = block.group(1).strip("\n")
-            if snippet:
-                snippets.append(snippet)
-        raw_function = SampleTrimmer.trim_preface_of_function(text)
-        if raw_function:
-            snippets.append(raw_function)
-        if text.strip():
-            snippets.append(text.strip())
-        seen: set[str] = set()
-        unique: list[str] = []
-        for snippet in snippets:
-            if snippet in seen:
-                continue
-            unique.append(snippet)
-            seen.add(snippet)
-        return unique
-
-    def _function_from_full_snippet(self, snippet: str) -> Function | None:
-        trimmed = self._trim_to_parseable_python(snippet)
-        if not trimmed:
-            return None
-        try:
-            return TextFunctionProgramConverter.text_to_function(trimmed)
-        except Exception:
-            return None
-
-    def _function_from_body_snippet(self, snippet: str) -> Function | None:
-        try:
-            func = SampleTrimmer.sample_to_function(snippet, self._template_program_obj or self._template_program)
-            if func is not None:
-                return func
-            indented = self._indent_as_function_body(snippet)
-            if indented != snippet:
-                return SampleTrimmer.sample_to_function(indented, self._template_program_obj or self._template_program)
-            return None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _indent_as_function_body(snippet: str) -> str:
-        lines = str(snippet or "").splitlines()
-        if not lines:
-            return ""
-        first_code = next((line for line in lines if line.strip()), "")
-        if first_code.startswith((" ", "\t")):
-            return snippet
-        return "\n".join(("    " + line if line.strip() else line) for line in lines)
 
     @staticmethod
     def _trim_to_parseable_python(snippet: str) -> str:

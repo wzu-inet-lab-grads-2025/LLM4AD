@@ -11,7 +11,7 @@ from typing import Optional
 
 from .population import Population
 from .prompt import EoHPrompt
-from .rl.grpo_trainer import _check_randomness, _check_score_metadata_leak, build_reward_fn_from_task_rl, is_population_eligible_event
+from .rl.grpo_trainer import _check_randomness, _check_score_metadata_leak, _supports_profile, build_reward_fn_from_task_rl, event_funnel, is_population_eligible_event
 from .sampler import EoHSampler
 from ...base import Evaluation, Function, LLM, Program, SecureEvaluator, TextFunctionProgramConverter
 
@@ -38,14 +38,15 @@ def operator_stats(events: list[dict]) -> dict:
         count = lambda key, source=rows: sum(bool(row.get(key)) for row in source)
         rewards = [float(row.get("reward") or 0.0) for row in rows]
         stats[op] = {
-            "total": len(rows),
-            "valid_count": len(valid),
-            "valid_rate": len(valid) / len(rows) if rows else 0.0,
-            "exec_success_count": count("exec_success"),
+            "funnel": event_funnel(rows),
             "parent_improve_count": count("beats_parent", valid),
             "parent_improve_only_count": sum(bool(row.get("beats_parent")) and not bool(row.get("beats_frontier")) for row in valid),
             "frontier_improve_count": count("beats_frontier", valid),
-            "valid_non_improving_count": sum(row.get("reward_quadrant") == "q3" for row in valid),
+            "valid_non_improving_count": sum(not bool(row.get("performance_improved")) for row in valid),
+            "paired_outcome_counts": {
+                outcome: sum(row.get("paired_outcome") == outcome for row in valid)
+                for outcome in ("positive", "neutral", "negative")
+            },
             "frac_reward_zero_std": float(len(rewards) > 1 and len(set(rewards)) == 1),
             "registered_to_population_count": count("registered_to_population"),
         }
@@ -127,16 +128,12 @@ class EoH:
         num_samplers: int = 1,
         num_evaluators: int = 1,
         *,
-        resume_mode: bool = False,
         debug_mode: bool = False,
-        multi_thread_or_process_eval: str = "thread",
         **kwargs,
     ):
-        del multi_thread_or_process_eval
         self._llm = llm
         self._profiler = profiler
         self._debug_mode = bool(debug_mode)
-        self._resume_mode = bool(resume_mode)
         self._num_evaluators = int(num_evaluators)
         self._num_samplers = max(1, int(num_samplers))
 
@@ -153,6 +150,8 @@ class EoH:
         cfg = dict(kwargs)
         rl_config = dict(cfg.pop("rl_config", {}) or {})
         self._grpo_config = dict(cfg.pop("grpo_config", rl_config.get("grpo", {})) or {})
+        self._seed = int(self._grpo_config.get("seed", 0) or 0)
+        self._enable_grpo = bool(cfg.pop("enable_grpo", rl_config.get("enabled", True)))
         reward_fn = cfg.pop("reward_fn", None)
         reward_config = dict(cfg.pop("reward_config", rl_config.get("task_rl", {})) or {})
         self._reward_fn = reward_fn or build_reward_fn_from_task_rl(reward_config, logger=logger)
@@ -164,7 +163,9 @@ class EoH:
         self._enable_ast_gate = bool(cfg.pop("enable_ast_gate", rl_config.get("enable_ast_gate", False)))
         self._checkpoint_dir = cfg.pop("checkpoint_dir", None) or os.path.join(getattr(profiler, "_log_dir", "") or ".", "checkpoints")
         self._checkpoint_auto_resume = bool(cfg.pop("checkpoint_auto_resume", rl_config.get("checkpoint_auto_resume", False)))
-        cfg.pop("task_name", None)
+        self._initial_population_path = cfg.pop("initial_population_path", rl_config.get("initial_population_path"))
+        self._save_final_lora = bool(cfg.pop("save_final_lora", rl_config.get("save_final_lora", False)))
+        self._compress_history = bool(cfg.pop("compress_history", rl_config.get("compress_history", True)))
 
         if self._samples_per_prompt != int(self._grpo_config.get("num_generations", self._samples_per_prompt) or self._samples_per_prompt):
             raise ValueError("samples_per_prompt must match grpo.num_generations for the minimal GRPO loop")
@@ -172,17 +173,25 @@ class EoH:
             raise ValueError("EoH-RL requires an LLM with batch draw support")
 
         llm.debug_mode = debug_mode
-        self._population = Population(pop_size=self._pop_size, minimize=self._minimize())
+        self._population = Population(pop_size=self._pop_size, minimize=self._minimize(), seed=self._seed)
         self._sampler = EoHSampler(llm, self._template_program_str, enable_ast_gate=self._enable_ast_gate)
         self._evaluator = SecureEvaluator(evaluation, debug_mode=debug_mode, **cfg)
         self._evaluation_executor = concurrent.futures.ThreadPoolExecutor(max_workers=self._num_evaluators)
 
         self._tot_sample_nums = 0
         self._grpo_update_count = 0
-        # Keep sampling during initialization until the active population is full
-        # or the overall sample budget is exhausted.
         self._initial_sample_nums_max = self._max_sample_nums if self._max_sample_nums is not None else 2 * self._pop_size
-        self._reward_events: list[dict] = []
+        self._initial_completion_count = 0
+        self._initial_evaluation_count = 0
+        self._online_funnel_counts = {
+            "completion_count": 0,
+            "contract_valid_count": 0,
+            "evaluation_count": 0,
+            "execution_valid_count": 0,
+            "population_eligible_count": 0,
+            "archive_novel_count": 0,
+        }
+        self._paired_parent_evaluation_count = 0
         self._best_curve: list[dict] = []
         self._latest_saved_lora_path: str | None = None
         self._final_saved_lora_path: str | None = None
@@ -196,11 +205,11 @@ class EoH:
         }
         self._timing_totals = {
             "initialization_wall_elapsed": 0.0,
-            "grpo_update_wall_elapsed": 0.0,
+            "update_wall_elapsed": 0.0,
             "prompt_build_wall_elapsed": 0.0,
-            "train_call_wall_elapsed": 0.0,
+            "policy_call_wall_elapsed": 0.0,
             "candidate_registration_wall_elapsed": 0.0,
-            "train_once_total_elapsed": 0.0,
+            "update_total_elapsed": 0.0,
             "trl_trainer_init_elapsed": 0.0,
             "trl_trainer_train_elapsed": 0.0,
             "trl_trainer_total_elapsed": 0.0,
@@ -208,14 +217,16 @@ class EoH:
             "reward_parse_wall_elapsed": 0.0,
             "reward_eval_wall_elapsed": 0.0,
             "reward_eval_program_time_total": 0.0,
+            "paired_parent_eval_wall_elapsed": 0.0,
             "run_wall_elapsed": 0.0,
         }
 
         os.makedirs(self._checkpoint_dir, exist_ok=True)
         if self._profiler is not None:
             self._profiler.record_parameters(llm, evaluation, self)
-        if self._checkpoint_auto_resume:
-            self._restore_checkpoint()
+        restored = self._restore_checkpoint() if self._checkpoint_auto_resume else False
+        if not restored and self._initial_population_path:
+            self._load_initial_population(self._initial_population_path)
 
     @staticmethod
     def _build_operator_cycle(use_e2: bool, use_m1: bool, use_m2: bool) -> list[str]:
@@ -282,30 +293,47 @@ class EoH:
             prompt = EoHPrompt.get_prompt_m2(self._task_description_str, parents[0], self._function_to_evolve)
         else:
             raise RuntimeError(f"unsupported EoH operator: {op}")
-        parent_best = max((parent.score for parent in parents), key=self._utility)
+        parent = max(parents, key=lambda item: self._utility(item.score))
+        parent_ids = self._parent_ids_for_samples(parents)
+        parent_profile = self._current_parent_profile(parent) if getattr(self._reward_fn, "reward_mode", None) == "vc_pair" else getattr(parent, "_eoh_profile", None)
         prompt_id = f"rl{update_id:03d}_{op}" if self._prompts_per_update == 1 and record_index == 0 else f"rl{update_id:03d}_{record_index:03d}_{op}"
         return EoHPrompt.build_prompt_record(
             prompt_id=prompt_id,
             prompt=prompt,
             operator_type=op,
-            parent_best_score=parent_best,
+            parent_best_score=parent.score,
+            parent_best_profile=parent_profile,
+            parent_best_id=parent_ids[parents.index(parent)],
             parent_codes=[str(parent) for parent in parents],
-            parent_ids=self._parent_ids_for_samples(parents),
+            parent_ids=parent_ids,
             population_best_score=self._best_population_score(),
             group_size=int(self._samples_per_prompt),
-            reward_contract="bqr_v1",
+            reward_contract="vc_pair_v1" if getattr(self._reward_fn, "reward_mode", None) == "vc_pair" else "aggregate_v1",
             system_prompt=EoHPrompt.get_system_prompt(),
         )
 
-    def _prompt_count_for_update(self, remaining_budget: int | None) -> int:
-        if remaining_budget is None:
-            return self._prompts_per_update
-        return max(0, min(self._prompts_per_update, int(remaining_budget) // self._samples_per_prompt))
+    def _current_parent_profile(self, parent: Function) -> list[float]:
+        profile = getattr(parent, "_eoh_profile", None)
+        if getattr(parent, "_eoh_profile_current", False) and profile:
+            return list(profile)
+        program = TextFunctionProgramConverter.function_to_program(parent, self._template_program)
+        if program is None:
+            raise RuntimeError("VC-PAIR could not reconstruct the direct parent program")
+        started = time.time()
+        score, _eval_time, diag = self._evaluate_program_with_diag(program)
+        self._timing_totals["paired_parent_eval_wall_elapsed"] += time.time() - started
+        self._paired_parent_evaluation_count += 1
+        profile = self._profile_from_diag(diag)
+        if score is None or not profile:
+            raise RuntimeError("VC-PAIR could not evaluate the direct parent profile")
+        if not math.isclose(float(score), float(parent.score), rel_tol=1.0e-9, abs_tol=1.0e-9):
+            raise RuntimeError(f"VC-PAIR parent score mismatch: checkpoint={parent.score}, current={score}")
+        setattr(parent, "_eoh_profile", profile)
+        setattr(parent, "_eoh_profile_current", True)
+        return profile
 
-    def _build_prompt_records(self, update_id: int, *, remaining_budget: int | None = None) -> list[dict]:
-        target = self._prompt_count_for_update(remaining_budget)
-        if target <= 0:
-            return []
+    def _build_prompt_records(self, update_id: int) -> list[dict]:
+        target = self._prompts_per_update
         records: list[dict] = []
         used_prompts: set[str] = set()
         max_attempts = max(target * 4, target)
@@ -335,13 +363,16 @@ class EoH:
         return results
 
     def _evaluate_program_with_diag(self, program):
-        if hasattr(self._evaluator, "evaluate_program_with_profile"):
-            started = time.time()
-            packet = self._evaluator.evaluate_program_with_profile(program)
+        if _supports_profile(self._evaluator):
+            if hasattr(self._evaluator, "evaluate_program_with_profile_record_time_with_diag"):
+                packet, eval_time, diag = self._evaluator.evaluate_program_with_profile_record_time_with_diag(program)
+            else:
+                started = time.time()
+                packet = self._evaluator.evaluate_program_with_profile(program)
+                eval_time, diag = time.time() - started, {"ok": packet is not None, "bucket": "ok" if packet is not None else "profile_eval_failed", "error_type": None}
             if isinstance(packet, dict) and packet.get("score") is not None:
-                diag = {"ok": True, "bucket": "ok", "error_type": None}
-                diag.update(packet)
-                return packet.get("score"), time.time() - started, diag
+                return packet.get("score"), eval_time, {**dict(diag or {}), **packet}
+            return None, eval_time, diag
         if hasattr(self._evaluator, "evaluate_program_record_time_with_diag"):
             return self._evaluator.evaluate_program_record_time_with_diag(program)
         score, eval_time = self._evaluator.evaluate_program_record_time(program)
@@ -374,7 +405,7 @@ class EoH:
                 }
         return {"ok": score is not None, "bucket": "ok" if score is not None else "eval_or_timeout", "error_type": None}
 
-    def _register_candidate(self, item: dict, *, source: str = "grpo") -> bool:
+    def _register_candidate(self, item: dict) -> bool:
         row, func, program_str = item["row"], item["func"], item["program_str"]
         meta, diag = item.get("meta") or {}, item.get("diag")
         score = item.get("score")
@@ -395,6 +426,7 @@ class EoH:
         profile = self._profile_from_diag(diag)
         if profile:
             setattr(func, "_eoh_profile", profile)
+            setattr(func, "_eoh_profile_current", True)
         blocked_by_gate = (
             bool(row.get("exact_parent_copy"))
             or bool(row.get("random_algo"))
@@ -429,11 +461,12 @@ class EoH:
             while len(self._population) < self._pop_size and self._tot_sample_nums < self._initial_sample_nums_max:
                 remaining = self._initial_sample_nums_max - self._tot_sample_nums
                 batch_n = min(self._samples_per_prompt * self._num_samplers, remaining)
-                records = self._sampler.get_strategy_and_function_records_batch(prompt, batch_n, strict_contract=True)
+                records = self._sampler.get_strategy_and_function_records_batch(prompt, batch_n)
                 eval_items = []
                 programs = []
                 for parsed in records:
                     self._tot_sample_nums += 1
+                    self._initial_completion_count += 1
                     func, program = parsed.get("func"), parsed.get("program")
                     if func is None or program is None:
                         continue
@@ -443,6 +476,7 @@ class EoH:
                     eval_items.append((int(self._tot_sample_nums), parsed, func, program, program_str))
                     programs.append(program)
 
+                self._initial_evaluation_count += len(programs)
                 for (sample_order, parsed, func, _program, program_str), (score, eval_time, diag) in zip(eval_items, self._evaluate_programs_parallel(programs)):
                     if score is None:
                         continue
@@ -461,6 +495,7 @@ class EoH:
                     profile = self._profile_from_diag(diag)
                     if profile:
                         setattr(func, "_eoh_profile", profile)
+                        setattr(func, "_eoh_profile_current", True)
                     if self._profiler is not None:
                         self._profiler.register_function(func, program=program_str, source="local")
                     self._population.add_initial_member(func)
@@ -469,7 +504,8 @@ class EoH:
                 if self._tot_sample_nums != last_reported:
                     print(
                         "[EoHRL:init] "
-                        f"evaluated={self._tot_sample_nums}/{self._max_sample_nums or self._initial_sample_nums_max} "
+                        f"completion={self._initial_completion_count}/{self._initial_sample_nums_max} "
+                        f"evaluated={self._initial_evaluation_count} "
                         f"pool={len(self._population)}/{self._pop_size} "
                         f"best={_fmt_score(self._best_population_score())}"
                     )
@@ -491,20 +527,20 @@ class EoH:
                 event["blocked_from_population"] = bool(row.get("blocked_from_population"))
             event["survived_main_population"] = bool(event.get("registered_to_population") and str(event.get("function") or "") in active_codes)
 
-    def _run_grpo_update(self) -> bool:
+    def _run_update(self) -> bool:
         update_started = time.time()
         if len(self._population) < self._pop_size:
-            logger.info("[EoHRL] active population is not full; skipping GRPO")
+            logger.info("[EoHRL] active population is not full; stopping updates")
             return False
         update_id = self._grpo_update_count + 1
         prompt_build_started = time.time()
-        prompt_records = self._build_prompt_records(update_id, remaining_budget=None)
+        prompt_records = self._build_prompt_records(update_id)
         prompt_build_elapsed = time.time() - prompt_build_started
         if not prompt_records:
             return False
         best_before = self._best_population_score()
         train_started = time.time()
-        result = self._llm.model_manager.train_once(
+        result = self._llm.model_manager.run_update(
             prompt_records=prompt_records,
             evaluator=self._evaluator,
             reward_fn=self._reward_fn,
@@ -513,10 +549,16 @@ class EoH:
             update_id=update_id,
             reward_eval_workers=self._reward_eval_workers,
             enable_ast_gate=self._enable_ast_gate,
+            training_enabled=self._enable_grpo,
+            known_functions=[str(func) for func in self._population.population],
         )
-        train_call_elapsed = time.time() - train_started
+        policy_call_elapsed = time.time() - train_started
+        if not result.get("executed"):
+            logger.warning("[EoHRL] update failed: %s", result.get("reason"))
+            return False
         summary = dict(result.get("reward_summary") or (result.get("metrics") or {}).get("reward_summary") or {})
-        total = int(summary.get("total", 0) or result.get("total", 0) or 0)
+        funnel = dict(summary.get("funnel") or {})
+        total = int(funnel.get("completion_count", 0) or 0)
         sample_order_base = self._tot_sample_nums
         self._tot_sample_nums += total
         registration_started = time.time()
@@ -525,39 +567,38 @@ class EoH:
             row = item.get("row") or {}
             row["sample_order"] = sample_order_base + int(row.get("completion_index") or index + 1)
             item["sample_order"] = row["sample_order"]
-        registered_count = sum(1 for item in candidates if self._register_candidate(item, source="local"))
-        events = list(summary.get("reward_events") or result.get("recent_reward_events", []) or [])
+        registered_count = sum(1 for item in candidates if self._register_candidate(item))
+        events = list(summary.get("reward_events") or [])
         self._mark_events_after_registration(events, candidates)
-        self._reward_events.extend(events)
+        for key in self._online_funnel_counts:
+            self._online_funnel_counts[key] += int(funnel.get(key, 0) or 0)
         registration_elapsed = time.time() - registration_started
         token_usage = dict(summary.get("token_usage") or (result.get("metrics") or {}).get("token_usage") or {})
         self._accumulate_token_usage(token_usage)
-        if not result.get("executed"):
-            logger.warning("[EoHRL] GRPO update failed: %s", result.get("reason"))
-            return False
         self._grpo_update_count = update_id
         best_after = self._best_population_score()
         metrics = dict(result.get("metrics") or {})
         timing = {
             **dict(metrics.get("timing") or {}),
-            "grpo_update_wall_elapsed": time.time() - update_started,
+            "update_wall_elapsed": time.time() - update_started,
             "prompt_build_wall_elapsed": prompt_build_elapsed,
-            "train_call_wall_elapsed": train_call_elapsed,
+            "policy_call_wall_elapsed": policy_call_elapsed,
             "candidate_registration_wall_elapsed": registration_elapsed,
         }
         self._accumulate_timing(timing)
         operator_types = [str(record.get("operator_type") or "") for record in prompt_records]
         operator_summary = operator_types[0] if len(set(operator_types)) == 1 else ",".join(operator_types)
         metrics.update(
-            rl_update_id=update_id,
+            update_id=update_id,
+            training_enabled=self._enable_grpo,
             operator_type=operator_summary,
             operator_types=operator_types,
             population_generation=self._population.generation,
             active_population_size=len(self._population),
             archive_size=self._population.archive_size,
-            total_sample_nums=self._tot_sample_nums,
-            best_before_rl=best_before,
-            best_after_rl=best_after,
+            total_completion_count=self._tot_sample_nums,
+            best_before=best_before,
+            best_after=best_after,
             registered_count=registered_count,
             token_usage=token_usage,
             token_usage_totals=dict(self._token_usage_totals),
@@ -566,37 +607,42 @@ class EoH:
             operator_stats=operator_stats(events),
             reward_summary={**summary, "reward_events": events, "operator_stats": operator_stats(events), "token_usage": token_usage, "timing": dict(summary.get("timing") or {})},
         )
-        if update_id % 100 == 0:
-            saved = self._save_lora_artifact(f"lora_update_{update_id:03d}")
-            if saved:
-                metrics["saved_lora_path"] = saved
-        self._best_curve.append({"rl_update_id": update_id, "population_generation": self._population.generation, "best": best_after})
-        self._save_rl_update_metrics(update_id, metrics)
-        self._save_checkpoint(tag=f"rl_{update_id:03d}")
+        self._best_curve.append({"update_id": update_id, "population_generation": self._population.generation, "best": best_after})
+        self._save_update_metrics(update_id, metrics)
+        self._save_checkpoint()
         reward_stats = dict(summary.get("reward_stats") or {})
+        paired = dict(summary.get("paired_outcome_counts") or {})
+        paired_mean = dict(summary.get("paired_mean_stats") or {})
         print(
-            "[EoHRL:grpo] "
+            "[EoHRL:update] "
             f"update={update_id} "
+            f"train={'on' if self._enable_grpo else 'off'} "
             f"gen={self._population.generation} "
             f"pop={self._population.archive_size} "
             f"active={len(self._population)}/{self._pop_size} "
             f"op={operator_summary} "
-            f"rollouts={total} "
-            f"valid={summary.get('valid_count', 0)} "
+            f"completion={total} "
+            f"contract={funnel.get('contract_valid_count', 0)} "
+            f"evaluated={funnel.get('evaluation_count', 0)} "
+            f"exec={funnel.get('execution_valid_count', 0)} "
+            f"eligible={funnel.get('population_eligible_count', 0)} "
+            f"novel={funnel.get('archive_novel_count', 0)} "
             f"parent_only={summary.get('parent_improve_only_count', 0)} "
             f"frontier={summary.get('frontier_improve_count', 0)} "
             f"non_improve={summary.get('valid_non_improving_count', 0)} "
+            f"pair={paired.get('positive', 0)}/{paired.get('neutral', 0)}/{paired.get('negative', 0)} "
+            f"pair_mean={_fmt_score(paired_mean.get('mean'))} "
             f"zero_std={float(summary.get('frac_reward_zero_std', 0.0)):.2f} "
             f"registered={registered_count} "
             f"tokens={token_usage.get('tokens_total', 0)} "
             f"in={token_usage.get('input_tokens_total', 0)} "
             f"out={token_usage.get('output_tokens_total', 0)} "
-            f"time={timing.get('grpo_update_wall_elapsed', 0.0):.2f}s "
+            f"time={timing.get('update_wall_elapsed', 0.0):.2f}s "
             f"reward_mean={_fmt_score(reward_stats.get('mean'))} "
             f"best={_fmt_score(best_before)}->{_fmt_score(best_after)}"
         )
         logger.info(
-            "[EoHRL:grpo:metrics] update=%d/%s token_usage=%s token_totals=%s timing=%s timing_totals=%s",
+            "[EoHRL:update:metrics] update=%d/%s token_usage=%s token_totals=%s timing=%s timing_totals=%s",
             update_id,
             self._max_grpo_updates,
             token_usage,
@@ -622,8 +668,8 @@ class EoH:
             except Exception:
                 pass
 
-    def _save_rl_update_metrics(self, update_id: int, metrics: dict) -> None:
-        update_dir = os.path.join(self._default_log_dir(), "rl_training", f"rl_update_{int(update_id):03d}")
+    def _save_update_metrics(self, update_id: int, metrics: dict) -> None:
+        update_dir = os.path.join(self._default_log_dir(), "updates", f"update_{int(update_id):03d}")
         os.makedirs(update_dir, exist_ok=True)
         _write_json_atomic(os.path.join(update_dir, "metrics.json"), metrics)
 
@@ -636,23 +682,27 @@ class EoH:
     def _save_checkpoint(self, *, tag: str = "latest") -> None:
         payload = {
             "population_generation": self._population.generation,
-            "tot_sample_nums": self._tot_sample_nums,
-            "rl_update_count": self._grpo_update_count,
+            "total_completion_count": self._tot_sample_nums,
+            "online_update_count": self._grpo_update_count,
             "population": [_serialize_function(func) for func in self._population.population],
             "best_curve": list(self._best_curve),
             "latest_saved_lora_path": self._latest_saved_lora_path,
             "final_saved_lora_path": self._final_saved_lora_path,
             "token_usage_totals": dict(self._token_usage_totals),
             "timing_totals": dict(self._timing_totals),
+            "initial_completion_count": self._initial_completion_count,
+            "initial_evaluation_count": self._initial_evaluation_count,
+            "online_funnel_counts": dict(self._online_funnel_counts),
+            "paired_parent_evaluation_count": self._paired_parent_evaluation_count,
         }
         _write_json_atomic(self._checkpoint_path(tag), payload)
         if tag != "latest":
             _write_json_atomic(self._checkpoint_path("latest"), payload)
 
-    def _restore_checkpoint(self) -> None:
+    def _restore_checkpoint(self) -> bool:
         path = self._checkpoint_path("latest")
         if not os.path.isfile(path):
-            return
+            return False
         with open(path, "r", encoding="utf-8") as file:
             state = json.load(file)
         self._population = Population(
@@ -660,25 +710,56 @@ class EoH:
             generation=int(state.get("population_generation", 0) or 0),
             pop=_deserialize_functions(state.get("population", [])),
             minimize=self._minimize(),
+            seed=self._seed,
         )
-        self._tot_sample_nums = int(state.get("tot_sample_nums", 0) or 0)
-        self._grpo_update_count = int(state.get("rl_update_count", 0) or 0)
+        self._tot_sample_nums = int(state.get("total_completion_count", 0) or 0)
+        self._grpo_update_count = int(state.get("online_update_count", 0) or 0)
         self._best_curve = list(state.get("best_curve") or [])
         self._latest_saved_lora_path = state.get("latest_saved_lora_path") or None
         self._final_saved_lora_path = state.get("final_saved_lora_path") or None
         self._token_usage_totals.update(dict(state.get("token_usage_totals") or {}))
         self._timing_totals.update(dict(state.get("timing_totals") or {}))
+        self._initial_completion_count = int(state.get("initial_completion_count", 0) or 0)
+        self._initial_evaluation_count = int(state.get("initial_evaluation_count", 0) or 0)
+        self._online_funnel_counts.update(dict(state.get("online_funnel_counts") or {}))
+        self._paired_parent_evaluation_count = int(state.get("paired_parent_evaluation_count", 0) or 0)
+        return True
+
+    def _load_initial_population(self, path: str) -> None:
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        with open(path, "r", encoding="utf-8") as file:
+            state = json.load(file)
+        if int(state.get("online_update_count", 0) or 0) != 0:
+            raise ValueError("initial_population_path must point to an initialization-only checkpoint")
+        population = Population(pop_size=self._pop_size, pop=_deserialize_functions(state.get("population", [])), minimize=self._minimize(), seed=self._seed)
+        if len(population) < self._pop_size:
+            raise ValueError(f"initial population is incomplete: {len(population)}/{self._pop_size}")
+        self._population = population
+        self._tot_sample_nums = int(state.get("total_completion_count", 0) or 0)
+        self._initial_completion_count = int(state.get("initial_completion_count", self._tot_sample_nums) or 0)
+        self._initial_evaluation_count = int(state.get("initial_evaluation_count", 0) or 0)
+        self._initial_population_path = path
+        logger.info("[EoHRL] loaded frozen initial population: %s", path)
 
     def get_runtime_summary(self) -> dict:
         return {
-            "rl_update_count": self._grpo_update_count,
+            "online_update_count": self._grpo_update_count,
+            "grpo_enabled": self._enable_grpo,
+            "initial_population_path": self._initial_population_path,
             "population_generation": self._population.generation,
-            "total_sample_nums": self._tot_sample_nums,
+            "total_completion_count": self._tot_sample_nums,
             "active_population_size": len(self._population),
             "archive_size": self._population.archive_size,
             "best_score": self._best_population_score(),
             "operator_cycle": list(self._operator_cycle),
             "samples_per_prompt": self._samples_per_prompt,
+            "initialization": {
+                "completion_count": self._initial_completion_count,
+                "evaluation_count": self._initial_evaluation_count,
+            },
+            "online_funnel": self._funnel_with_rates(self._online_funnel_counts),
+            "paired_parent_evaluation_count": self._paired_parent_evaluation_count,
+            "total_evaluation_count": self._initial_evaluation_count + self._online_funnel_counts["evaluation_count"] + self._paired_parent_evaluation_count,
             "latest_saved_lora_path": self._latest_saved_lora_path,
             "final_saved_lora_path": self._final_saved_lora_path,
             "token_usage_totals": dict(self._token_usage_totals),
@@ -693,6 +774,16 @@ class EoH:
         self._latest_saved_lora_path = path
         return path
 
+    @staticmethod
+    def _funnel_with_rates(counts: dict) -> dict:
+        total = int(counts.get("completion_count", 0) or 0)
+        rates = {
+            key.replace("_count", "_rate"): int(value or 0) / total if total else 0.0
+            for key, value in counts.items()
+            if key != "completion_count"
+        }
+        return {**counts, **rates}
+
     def _write_run_summary(self) -> None:
         path = os.path.join(self._default_log_dir(), "run_summary.json")
         _write_json_atomic(path, self.get_runtime_summary())
@@ -703,15 +794,12 @@ class EoH:
             if len(self._population) < self._pop_size:
                 self._sample_initialize_population()
             if len(self._population) < self._pop_size:
-                print(
-                    f"The search is terminated since EoH-RL only obtained {len(self._population)}/{self._pop_size} feasible algorithms during initialization."
-                )
                 self._finalize_run_timing(run_started)
                 self._write_run_summary()
-                return
+                raise RuntimeError(f"EoH-RL initialization obtained only {len(self._population)}/{self._pop_size} feasible algorithms")
             while self._continue_updates():
                 try:
-                    if not self._run_grpo_update():
+                    if not self._run_update():
                         break
                 except KeyboardInterrupt:
                     break
@@ -719,11 +807,13 @@ class EoH:
                     if self._debug_mode:
                         traceback.print_exc()
                         raise
-                    logger.exception("[EoHRL] GRPO update failed; stopping to protect search state")
+                    logger.exception("[EoHRL] update failed; stopping to protect search state")
                     break
             self._finalize_run_timing(run_started)
-            self._final_saved_lora_path = self._save_lora_artifact("lora_final")
-            self._save_checkpoint(tag="latest_finish")
+            completed = self._grpo_update_count >= self._max_grpo_updates
+            if self._enable_grpo and completed and self._save_final_lora:
+                self._final_saved_lora_path = self._save_lora_artifact("lora_final")
+            self._save_checkpoint(tag="latest_finish" if completed else "latest")
             self._write_run_summary()
             logger.info(
                 "[EoHRL:summary] updates=%d/%s token_totals=%s timing_totals=%s best=%s",
@@ -733,6 +823,13 @@ class EoH:
                 self._timing_totals,
                 self._best_population_score(),
             )
+            if completed and self._compress_history and self._profiler is not None:
+                try:
+                    self._profiler.archive_history()
+                except Exception:
+                    logger.exception("[EoHRL] failed to compress run history")
+            if not completed:
+                raise RuntimeError(f"EoH-RL stopped at {self._grpo_update_count}/{self._max_grpo_updates} updates")
         finally:
             try:
                 self._evaluation_executor.shutdown(cancel_futures=True)

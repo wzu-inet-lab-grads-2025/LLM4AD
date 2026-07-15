@@ -6,6 +6,7 @@ from dataclasses import dataclass, fields
 
 @dataclass(frozen=True)
 class EoHRLArgs:
+    enable_grpo: bool = True
     max_steps: int = 500
     max_samples: int = 2000
     n_prompts: int = 1
@@ -21,7 +22,17 @@ class EoHRLArgs:
     lr: float = 5.0e-5
     beta: float = 0.04
     epsilon: float = 0.15
+    epsilon_high: float = 0.28
     seed: int = 42
+    initial_population_path: str | None = None
+    reward_mode: str = "vc_pair"
+    pair_se_multiplier: float = 1.0
+    pair_margin: float = 1.0e-4
+    pair_positive_reward: float = 1.0
+    pair_neutral_reward: float = 0.0
+    pair_negative_reward: float = -0.5
+    save_final_lora: bool = False
+    compress_history: bool = True
 
     temperature: float = 1.0
     top_p: float = 1.0
@@ -54,15 +65,6 @@ def apply_runtime_defaults(cfg: dict) -> dict:
         cfg.get("lora"),
     )
     cfg["sft"] = _merge(_sft_defaults(args, cfg.get("sft")), cfg.get("sft"))
-    cfg["vllm"] = _merge(
-        {
-            "gpu_memory_utilization": args.gpu_memory_utilization,
-            "max_tokens": args.model_max_length,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-        },
-        cfg.get("vllm"),
-    )
     cfg["evolution"] = _merge(
         {
             "max_generations": args.max_steps,
@@ -74,18 +76,23 @@ def apply_runtime_defaults(cfg: dict) -> dict:
         cfg.get("evolution"),
     )
     cfg["grpo"] = _merge(_grpo_defaults(args, server_port), cfg.get("grpo"))
+    group_size = int(cfg["grpo"]["num_generations"])
+    cfg["grpo"]["generation_batch_size"] = group_size
+    cfg["grpo"]["per_device_train_batch_size"] = group_size
     cfg["rl"] = _merge(
         {
-            "enabled": True,
+            "enabled": args.enable_grpo,
             "enable_ast_gate": False,
             "samples_per_prompt": args.n_generations,
             "checkpoint_auto_resume": True,
+            "initial_population_path": args.initial_population_path,
+            "save_final_lora": args.save_final_lora,
+            "compress_history": args.compress_history,
         },
         cfg.get("rl"),
     )
     cfg["task_rl_common"] = _merge(
         {
-            "reward_type": "eoh_graded_v1",
             "minimize": False,
             "detect_randomness": args.detect_randomness,
             "reward_parse_fail": -1.00,
@@ -95,6 +102,12 @@ def apply_runtime_defaults(cfg: dict) -> dict:
             "reward_leak": -0.70,
             "epsilon": 1.0e-4,
             "q3_scale": 0.50,
+            "reward_mode": args.reward_mode,
+            "pair_se_multiplier": args.pair_se_multiplier,
+            "pair_margin": args.pair_margin,
+            "pair_positive_reward": args.pair_positive_reward,
+            "pair_neutral_reward": args.pair_neutral_reward,
+            "pair_negative_reward": args.pair_negative_reward,
         },
         cfg.get("task_rl_common"),
     )
@@ -138,12 +151,7 @@ def _sft_defaults(args: EoHRLArgs, user_sft: dict | None) -> dict:
 
 def _grpo_defaults(args: EoHRLArgs, server_port: int) -> dict:
     return {
-        "backend": "resident_unsloth_trl",
-        "rollout_source": "integrated_grouped_eoh_operator",
-        "trigger_every_n_generations": 1,
         "prompts_per_update": args.n_prompts,
-        "operator_cycle": ["e1", "e2", "m1", "m2"],
-        "anchor_baseline": "best",
         "use_vllm": True,
         "vllm_mode": "colocate",
         "vllm_model_impl": "vllm",
@@ -163,16 +171,21 @@ def _grpo_defaults(args: EoHRLArgs, server_port: int) -> dict:
         "top_p": args.top_p,
         "beta": args.beta,
         "epsilon": args.epsilon,
+        "epsilon_high": args.epsilon_high,
         "learning_rate": args.lr,
         "lr_scheduler_type": "constant",
         "optim": "adamw_8bit",
         "adam_beta1": 0.9,
         "adam_beta2": 0.99,
-        "scale_rewards": None,
-        "loss_type": None,
+        "scale_rewards": "group",
+        "loss_type": "dapo",
         "num_iterations": 1,
+        "importance_sampling_level": "token",
+        "mask_truncated_completions": True,
+        "vllm_importance_sampling_correction": True,
         "num_train_epochs": 1,
-        "per_device_train_batch_size": 1,
+        "generation_batch_size": args.n_generations,
+        "per_device_train_batch_size": args.n_generations,
         "gradient_accumulation_steps": 1,
         "max_seq_length": args.model_max_length,
         "warmup_ratio": 0.0,
@@ -203,9 +216,7 @@ def _merge(defaults: dict, overrides: dict | None) -> dict:
 
 
 def _first_int(values, default: int) -> int:
-    if isinstance(values, (list, tuple)) and values:
-        return int(values[0])
-    return int(default)
+    return int(values[0]) if isinstance(values, (list, tuple)) and values else int(default)
 
 
 __all__ = ["EoHRLArgs", "apply_runtime_defaults"]

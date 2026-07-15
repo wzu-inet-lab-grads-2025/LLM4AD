@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import tarfile
 from datetime import datetime
 from typing import Any
 
@@ -62,17 +64,23 @@ class EoHProfiler:
     def record_parameters(self, llm, evaluation, method) -> None:
         if not self._log_dir:
             return
-        max_generations = getattr(method, "_max_generations", None)
-        if max_generations is None:
-            max_generations = getattr(method, "_max_grpo_updates", None)
-        self._append_run_log({"llm": llm.__class__.__name__, "problem": evaluation.__class__.__name__, "method": "EoHRL", "max_generations": max_generations, "max_sample_nums": getattr(method, "_max_sample_nums", None), "pop_size": getattr(method, "_pop_size", None), "samples_per_prompt": getattr(method, "_samples_per_prompt", None), "grpo": getattr(method, "_grpo_config", None)})
+        self._append_run_log({
+            "llm": llm.__class__.__name__,
+            "problem": evaluation.__class__.__name__,
+            "method": "EoHRL",
+            "grpo_enabled": getattr(method, "_enable_grpo", None),
+            "online_update_count": getattr(method, "_max_grpo_updates", None),
+            "initialization_completion_budget": getattr(method, "_max_sample_nums", None),
+            "pop_size": getattr(method, "_pop_size", None),
+            "responses_per_prompt": getattr(method, "_samples_per_prompt", None),
+            "grpo_config": getattr(method, "_grpo_config", None),
+        })
 
     def register_function(
         self,
         function,
         program: str = "",
         *,
-        resume_mode: bool = False,
         source: str | None = None,
         record_best: bool = True,
     ) -> None:
@@ -82,31 +90,45 @@ class EoHProfiler:
         self._evaluate_failed_program_num += int(score is None)
         if record_best and score is not None and float(score) > self._cur_best_program_score:
             self._cur_best_program_score = float(score)
-            if not resume_mode:
-                self._write_sample(function, program, source=source, record_type="best")
-        if not resume_mode:
-            self._write_sample(function, program, source=source, record_type="history")
-            if self._log_style == "complex":
-                sample_source = self._display_source(function, source)
-                print(
-                    "[EoHRL:candidate] "
-                    f"sample={self._num_samples} "
-                    f"source={sample_source} "
-                    f"op={getattr(function, 'operator', None)} "
-                    f"score={_fmt(getattr(function, 'score', None))} "
-                    f"best={_fmt(self._cur_best_program_score)} "
-                    f"eval={_fmt(getattr(function, 'evaluate_time', None), 2)}s"
-                )
+            self._write_sample(function, program, source=source, record_type="best")
+        self._write_sample(function, program, source=source, record_type="history")
+        if self._log_style == "complex":
+            sample_source = self._display_source(function, source)
+            print(
+                "[EoHRL:candidate] "
+                f"sample={self._num_samples} "
+                f"source={sample_source} "
+                f"op={getattr(function, 'operator', None)} "
+                f"score={_fmt(getattr(function, 'score', None))} "
+                f"best={_fmt(self._cur_best_program_score)} "
+                f"eval={_fmt(getattr(function, 'evaluate_time', None), 2)}s"
+            )
 
     def register_population(self, pop) -> None:
         generation = int(getattr(pop, "generation", 0) or 0)
         if not self._log_dir or generation == self._cur_gen:
             return
         self._cur_gen = generation
-        self._write_json(os.path.join(self._population_dir, f"pop_{generation}.json"), [self._serialize_function(func) for func in getattr(pop, "population", []) or []])
+        members = getattr(pop, "active_population", None)
+        members = members if members is not None else (getattr(pop, "population", []) or [])
+        self._write_json(os.path.join(self._population_dir, f"pop_{generation}.json"), [self._serialize_function(func) for func in members])
 
-    def finish(self) -> None:
-        return None
+    def archive_history(self) -> str | None:
+        names = [name for name in ("population", "samples", "online_grpo") if os.path.isdir(os.path.join(self._log_dir, name))]
+        if not names:
+            return None
+        path, tmp = os.path.join(self._log_dir, "history.tar.gz"), os.path.join(self._log_dir, "history.tar.gz.tmp")
+        try:
+            with tarfile.open(tmp, "w:gz", compresslevel=6) as archive:
+                for name in names:
+                    archive.add(os.path.join(self._log_dir, name), arcname=name)
+            os.replace(tmp, path)
+            for name in names:
+                shutil.rmtree(os.path.join(self._log_dir, name))
+            return path
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
     def _write_sample(self, function, program: str, *, source: str | None, record_type: str) -> None:
         if not self._log_dir:

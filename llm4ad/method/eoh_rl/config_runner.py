@@ -51,7 +51,6 @@ def run_from_config(*, config_path: str, task_family: str | None = None) -> None
     grpo_cfg = dict(_require(cfg, "grpo"))
     rl_cfg = dict(_require(cfg, "rl"))
     lora_cfg = normalize_lora_config(dict(_require(cfg, "lora")))
-    vllm_cfg = dict(_require(cfg, "vllm"))
     reward_cfg = dict(_require(cfg, "task_rl_common"))
     logging_cfg = dict(_require(cfg, "logging"))
     sft_cfg = dict(_require(cfg, "sft"))
@@ -64,21 +63,21 @@ def run_from_config(*, config_path: str, task_family: str | None = None) -> None
         raise ValueError("rl.samples_per_prompt 必须等于 grpo.num_generations")
 
     training_gpus = list(_require(cfg, "training_gpus"))
-    if not list(_require(cfg, "inference_gpus")) or not training_gpus or not list(_require(cfg, "inference_ports")):
-        raise ValueError("inference_gpus / training_gpus / inference_ports 不能为空")
+    if not list(_require(cfg, "inference_gpus")) or not training_gpus:
+        raise ValueError("inference_gpus / training_gpus 不能为空")
     os.environ["CUDA_VISIBLE_DEVICES"] = _cuda_visible_devices_from_cfg(cfg)
     if cfg.get("pytorch_alloc_conf"):
         os.environ["PYTORCH_ALLOC_CONF"] = os.environ["PYTORCH_CUDA_ALLOC_CONF"] = str(cfg["pytorch_alloc_conf"]).strip()
-
     run_context = _create_run_context(logging_cfg, spec, allow_existing=bool(rl_cfg.get("checkpoint_auto_resume", True)))
     run_log_dir = run_context["run_log_dir"]
     checkpoint_dir = os.path.join(run_log_dir, "checkpoints")
-    for subdir in ("online_grpo", "rl_training", "checkpoints"):
+    for subdir in ("online_grpo", "updates", "checkpoints"):
         os.makedirs(os.path.join(run_log_dir, subdir), exist_ok=True)
     _configure_logging(run_log_dir, spec["logger_name"])
     run_logger = logging.getLogger(spec["logger_name"])
 
     task, task_name, scale_name, task_params = _build_task(task_cfg, evolution_cfg, spec)
+    _seed_runtime(int(grpo_cfg["seed"]))
     model_path = str(_require(cfg, "local_model_path")).strip()
     manifest = {
         "script": os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else None,
@@ -98,6 +97,20 @@ def run_from_config(*, config_path: str, task_family: str | None = None) -> None
         "phase1_sft_lora_path": sft_cfg.get("load_lora_path"),
         "cold_start_from_base": str(sft_cfg.get("mode") or "cold_start") == "cold_start",
         "sft_mode": str(sft_cfg.get("mode") or "cold_start"),
+        "grpo_enabled": bool(rl_cfg["enabled"]),
+        "reward_mode": reward_cfg["reward_mode"],
+        "reward_config": reward_cfg,
+        "seed": int(grpo_cfg["seed"]),
+        "initial_population_path": rl_cfg.get("initial_population_path"),
+        "online_update_count": int(evolution_cfg["max_generations"]),
+        "prompts_per_update": int(grpo_cfg["prompts_per_update"]),
+        "responses_per_prompt": int(grpo_cfg["num_generations"]),
+        "planned_online_completion_count": (
+            int(evolution_cfg["max_generations"])
+            * int(grpo_cfg["prompts_per_update"])
+            * int(grpo_cfg["num_generations"])
+        ),
+        "grpo_config": grpo_cfg,
     }
     _write_yaml(os.path.join(run_log_dir, "config_resolved.yaml"), raw_cfg_root)
     run_logger.info("=" * 60)
@@ -126,12 +139,11 @@ def run_from_config(*, config_path: str, task_family: str | None = None) -> None
     EoHProfiler.write_run_manifest(run_log_dir, manifest)
 
     reward_fn = build_reward_fn_from_task_rl(reward_cfg, run_logger)
-    run_logger.info("开始 Phase 2 EoH-RL + GRPO...")
+    run_logger.info("开始 Phase 2 EoH-RL，GRPO=%s", "开启" if rl_cfg["enabled"] else "关闭")
     policy = ResidentGRPOPolicy(
         model_name_or_path=model_path,
         grpo_config=grpo_cfg,
         adapter_config=lora_cfg,
-        vllm_config=vllm_cfg,
         training_gpus=training_gpus,
         initial_adapter_path=sft_runtime.get("initial_lora_path"),
         quantization=cfg.get("inference_quantization"),
@@ -152,10 +164,12 @@ def run_from_config(*, config_path: str, task_family: str | None = None) -> None
         samples_per_prompt=int(_require(rl_cfg, "samples_per_prompt")),
         grpo_config=grpo_cfg,
         reward_fn=reward_fn,
-        task_name=task_name,
         checkpoint_dir=checkpoint_dir,
         checkpoint_auto_resume=bool(rl_cfg.get("checkpoint_auto_resume", True)),
+        initial_population_path=rl_cfg.get("initial_population_path"),
         enable_ast_gate=bool(rl_cfg.get("enable_ast_gate", False)),
+        save_final_lora=bool(rl_cfg.get("save_final_lora", False)),
+        compress_history=bool(rl_cfg.get("compress_history", True)),
     )
     status, runtime_summary = "completed", {}
     try:
@@ -239,6 +253,19 @@ def _require(mapping: dict, key: str):
 def _cuda_visible_devices_from_cfg(cfg: dict) -> str:
     ids = sorted({int(value) for value in list(_require(cfg, "inference_gpus")) + list(_require(cfg, "training_gpus"))})
     return ",".join(str(value) for value in ids)
+
+
+def _seed_runtime(seed: int) -> None:
+    import random
+
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _create_run_context(logging_cfg: dict, spec: dict, *, allow_existing: bool) -> dict:

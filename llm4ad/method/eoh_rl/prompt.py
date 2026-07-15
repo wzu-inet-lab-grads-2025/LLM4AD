@@ -14,10 +14,6 @@ class EoHPrompt:
     )
 
     @classmethod
-    def create_instruct_prompt(cls, prompt: str) -> List[Dict]:
-        return [{"role": "user", "content": prompt}]
-
-    @classmethod
     def get_system_prompt(cls) -> str:
         return ""
 
@@ -29,11 +25,13 @@ class EoHPrompt:
         prompt: str,
         operator_type: str,
         parent_best_score: float | None = None,
+        parent_best_profile: List[float] | None = None,
+        parent_best_id: int | None = None,
         parent_codes: List[str] | None = None,
         parent_ids: List[int] | None = None,
         population_best_score: float | None = None,
         group_size: int = 1,
-        reward_contract: str = "bqr_v1",
+        reward_contract: str = "vc_pair_v1",
         system_prompt: str | None = None,
     ) -> Dict:
         user_prompt = str(prompt or "").strip()
@@ -49,16 +47,17 @@ class EoHPrompt:
         return {
             "prompt_id": prompt_id_text,
             "prompt": user_prompt,
-            "user_prompt": user_prompt,
             "system_prompt": system_prompt,
             "messages": cls._build_messages(system_prompt, user_prompt),
             "operator_type": operator_text,
             "parent_best_score": parent_best_score,
+            "parent_best_profile": None if parent_best_profile is None else list(parent_best_profile),
+            "parent_best_id": parent_best_id,
             "parent_codes": list(parent_codes or []),
             "parent_ids": None if parent_ids is None else list(parent_ids),
             "population_best_score": population_best_score,
             "group_size": int(group_size),
-            "reward_contract": str(reward_contract or "bqr_v1"),
+            "reward_contract": str(reward_contract or "vc_pair_v1"),
         }
 
     @staticmethod
@@ -129,10 +128,6 @@ class EoHPrompt:
             "The algorithm must be deterministic. Do not use randomness, time, external state, hidden evaluation information, or unavailable imports. "
             "Keep the implementation concise and focused on the main ranking, priority, or selection rule."
         )
-
-    @classmethod
-    def with_recovery_context(cls, prompt: str) -> str:
-        return str(prompt or "").strip()
 
     @classmethod
     def get_prompt_i1(cls, task_prompt: str, template_function: Function) -> str:

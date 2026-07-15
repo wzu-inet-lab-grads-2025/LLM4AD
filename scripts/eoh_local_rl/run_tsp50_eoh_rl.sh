@@ -8,7 +8,7 @@ export TARGET_PORT="${TARGET_PORT:-22001}"
 export TARGET_GROUP_PORT="${TARGET_GROUP_PORT:-51213}"
 export TSP_SCALE="${TSP_SCALE:-small}"
 export TSP_LABEL="${TSP_LABEL:-50}"
-export RUN_ID_PREFIX="${RUN_ID_PREFIX:-eoh_rl_grpo_np1_TSP50}"
+export RUNS_PER_VARIANT="${RUNS_PER_VARIANT:-1}"
 export SFT_LOAD_LORA_PATH="${SFT_LOAD_LORA_PATH:-/home/yuanyilun/projects/LLM4AD/data/SFT/tsp/small/lora_sft}"
 
 exec "${SCRIPT_DIR}/_run_tsp_eoh_rl.sh" "$@"

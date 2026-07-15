@@ -62,10 +62,12 @@ class Population:
         pop: List[Function] | "Population" | None = None,
         *,
         minimize: bool = False,
+        seed: int = 0,
     ):
         self._pop_size = int(pop_size)
         self._generation = int(generation)
         self._minimize = bool(minimize)
+        self._rng = np.random.default_rng(int(seed))
         self._population = list(pop._population if isinstance(pop, Population) else (pop or []))
         self._population = self._deduplicate(self._population)
         self._sort_in_place(self._population)
@@ -120,7 +122,7 @@ class Population:
             raise RuntimeError("EoH-RL parent selection requires a non-empty active population")
         rank = 1 + np.arange(len(funcs), dtype=float)
         probs = (1.0 / rank) / np.sum(1.0 / rank)
-        return np.random.choice(funcs, p=probs)
+        return self._rng.choice(funcs, p=probs)
 
     def crossover_selection(self) -> list[Function]:
         parent1 = self.active_population[0]

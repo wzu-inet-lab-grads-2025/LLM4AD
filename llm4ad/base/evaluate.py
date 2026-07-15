@@ -152,6 +152,10 @@ class SecureEvaluator:
             elif fork_proc is False:
                 multiprocessing.set_start_method('spawn', force=True)
 
+    @property
+    def supports_profile_evaluation(self) -> bool:
+        return callable(getattr(self._evaluator, 'evaluate_program_with_profile', None))
+
     def _modify_program_code(self, program_str: str) -> str:
         function_name = TextFunctionProgramConverter.text_to_function(program_str).name
         if self._evaluator.use_numba_accelerate:
@@ -285,6 +289,7 @@ class SecureEvaluator:
 
     def evaluate_program_with_profile(self, program: str | Program, **kwargs):
         """安全执行 evaluator.evaluate_program_with_profile，返回 score 和 performance profile。"""
+        capture_diag = bool(kwargs.pop('_capture_eval_diag', False))
         try:
             program_str = str(program)
             function_name = TextFunctionProgramConverter.text_to_function(program_str).name
@@ -300,37 +305,49 @@ class SecureEvaluator:
                 process.start()
                 if self._evaluator.timeout_seconds is not None:
                     try:
-                        result = result_queue.get(timeout=self._evaluator.timeout_seconds)
+                        packet = result_queue.get(timeout=self._evaluator.timeout_seconds)
                     except:
-                        result = None
+                        packet = self._pack_eval_result_with_diag(None, {'ok': False, 'bucket': 'timeout', 'error_type': 'TimeoutError', 'error': 'profile evaluation timed out'})
                     process.terminate()
                     process.join(timeout=5)
                     if process.is_alive():
                         process.kill()
                         process.join()
-                    return result
-                result = result_queue.get()
+                    result, _ = self._unpack_eval_result_with_diag(packet)
+                    return packet if capture_diag else result
+                packet = result_queue.get()
                 process.terminate()
                 process.join(timeout=5)
                 if process.is_alive():
                     process.kill()
                     process.join()
-                return result
-            return self._evaluate_profile(program_str, function_name, **kwargs)
-        except Exception:
+                result, _ = self._unpack_eval_result_with_diag(packet)
+                return packet if capture_diag else result
+            result = self._evaluate_profile(program_str, function_name, **kwargs)
+            packet = self._pack_eval_result_with_diag(result, {'ok': result is not None, 'bucket': 'ok' if result is not None else 'none_return', 'error_type': None})
+            return packet if capture_diag else result
+        except Exception as exc:
             if self._debug_mode:
                 print("DEBUG: Exception occurred in evaluate_program_with_profile:")
                 traceback.print_exc()
-            return None
+            packet = self._pack_eval_result_with_diag(None, {'ok': False, 'bucket': 'exception', 'error_type': type(exc).__name__, 'error': str(exc)})
+            return packet if capture_diag else None
+
+    def evaluate_program_with_profile_record_time_with_diag(self, program: str | Program, **kwargs):
+        started = time.time()
+        packet = self.evaluate_program_with_profile(program, _capture_eval_diag=True, **kwargs)
+        result, diag = self._unpack_eval_result_with_diag(packet)
+        return result, time.time() - started, diag
 
     def _evaluate_profile_in_safe_process(self, program_str: str, function_name, result_queue: multiprocessing.Queue, **kwargs):
         """子进程内编译并执行 profile 评估。"""
         try:
-            result_queue.put(self._evaluate_profile(program_str, function_name, **kwargs))
-        except Exception:
+            result = self._evaluate_profile(program_str, function_name, **kwargs)
+            result_queue.put(self._pack_eval_result_with_diag(result, {'ok': result is not None, 'bucket': 'ok' if result is not None else 'none_return', 'error_type': None}))
+        except Exception as exc:
             if self._debug_mode:
                 traceback.print_exc()
-            result_queue.put(None)
+            result_queue.put(self._pack_eval_result_with_diag(None, {'ok': False, 'bucket': 'exception', 'error_type': type(exc).__name__, 'error': str(exc)}))
 
     def _evaluate_profile(self, program_str: str, function_name, **kwargs):
         """当前进程内编译并执行 profile 评估。"""

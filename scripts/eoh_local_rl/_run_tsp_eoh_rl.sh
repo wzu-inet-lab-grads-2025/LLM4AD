@@ -7,14 +7,21 @@ PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 CONDA_ENV="${CONDA_ENV:-/home/yuanyilun/miniconda3/envs/LLM4AD}"
 PYTHON="${PYTHON:-${CONDA_ENV}/bin/python}"
 
-RUNS_PER_VARIANT="${RUNS_PER_VARIANT:-3}"
 DRY_RUN="${DRY_RUN:-0}"
+RUNS_PER_VARIANT="${RUNS_PER_VARIANT:-1}"
 TARGET_GPU="${TARGET_GPU:-0}"
 TARGET_PORT="${TARGET_PORT:-22001}"
 TARGET_GROUP_PORT="${TARGET_GROUP_PORT:-$((TARGET_PORT + 29212))}"
 TSP_SCALE="${TSP_SCALE:-small}"
 TSP_LABEL="${TSP_LABEL:-${TSP_SCALE}}"
-RUN_ID_PREFIX="${RUN_ID_PREFIX:-eoh_rl_grpo_np1_TSP${TSP_LABEL}}"
+EXPERIMENT_ID="${EXPERIMENT_ID:-eoh_rl_comparison}"
+RUN_BATCH_ID="${RUN_BATCH_ID:-}"
+VARIANT="${VARIANT:-vc_pair}"
+ENABLE_GRPO="${ENABLE_GRPO:-1}"
+SEED="${SEED:-42}"
+INITIAL_POPULATION_PATH="${INITIAL_POPULATION_PATH:-}"
+REWARD_MODE="${REWARD_MODE:-vc_pair}"
+RUN_ID_PREFIX="${RUN_ID_PREFIX:-${EXPERIMENT_ID}_${VARIANT}_TSP${TSP_LABEL}_seed${SEED}}"
 
 LOCAL_MODEL_PATH="${LOCAL_MODEL_PATH:-/home/yuanyilun/models/deepseek-coder-7b-instruct-v1.5}"
 SFT_MODE="${SFT_MODE:-load_existing}"
@@ -24,8 +31,13 @@ SFT_OUTPUT_DIR="${SFT_OUTPUT_DIR:-${PROJECT_ROOT}/data/SFT/tsp/${TSP_SCALE}}"
 SOURCE_CONFIG="${SOURCE_CONFIG:-${PROJECT_ROOT}/configs/run_eoh_local_rl/eoh_local_rl_tsp.yaml}"
 RUN_ROOT_BASE="${RUN_ROOT_BASE:-${PROJECT_ROOT}/logs/TSP/eoh_local_rl}"
 LOG_BASE_DIR="${LOG_BASE_DIR:-${PROJECT_ROOT}/logs}"
-RUN_ROOT_TS="$(date +%Y%m%d_%H%M%S)"
+RUN_ROOT_TS="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 CONFIG_PATH="${SOURCE_CONFIG}"
+
+if [ "${RUNS_PER_VARIANT}" != "1" ]; then
+  echo "[ERROR] A single-run script requires RUNS_PER_VARIANT=1; use a comparison script for multiple seeds." >&2
+  exit 1
+fi
 
 if [ ! -x "${PYTHON}" ]; then
   echo "[ERROR] Python not found or not executable: ${PYTHON}" >&2
@@ -70,7 +82,15 @@ EOH_RL_RUNTIME_OVERRIDES_JSON="$(
   NUM_EVALUATORS="${NUM_EVALUATORS:-}" \
   LR="${LR:-}" \
   BETA="${BETA:-}" \
+  PAIR_SE_MULTIPLIER="${PAIR_SE_MULTIPLIER:-}" \
+  PAIR_MARGIN="${PAIR_MARGIN:-}" \
   GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}" \
+  ENABLE_GRPO="${ENABLE_GRPO}" \
+  SEED="${SEED}" \
+  INITIAL_POPULATION_PATH="${INITIAL_POPULATION_PATH}" \
+  REWARD_MODE="${REWARD_MODE}" \
+  SAVE_FINAL_LORA="${SAVE_FINAL_LORA:-}" \
+  COMPRESS_HISTORY="${COMPRESS_HISTORY:-}" \
   "${PYTHON}" -c 'import json, os, sys
 
 FORBIDDEN = {"grpo", "evolution", "rl", "vllm", "lora", "task_rl_common"}
@@ -92,6 +112,20 @@ if isinstance(eoh_base, dict):
         eoh_base.pop(key, None)
 
 args = {"vllm_group_port": int(os.environ["TARGET_GROUP_PORT"])}
+enabled = os.environ["ENABLE_GRPO"].strip().lower()
+if enabled not in {"0", "1", "false", "true"}:
+    raise SystemExit("ENABLE_GRPO must be one of: 0, 1, false, true")
+args["enable_grpo"] = enabled in {"1", "true"}
+args["seed"] = int(os.environ["SEED"])
+args["initial_population_path"] = os.environ["INITIAL_POPULATION_PATH"].strip() or None
+args["reward_mode"] = os.environ["REWARD_MODE"].strip()
+for env_key, arg_key in {"SAVE_FINAL_LORA": "save_final_lora", "COMPRESS_HISTORY": "compress_history"}.items():
+    value = os.environ.get(env_key, "").strip().lower()
+    if not value:
+        continue
+    if value not in {"0", "1", "false", "true"}:
+        raise SystemExit(f"{env_key} must be one of: 0, 1, false, true")
+    args[arg_key] = value in {"1", "true"}
 env_to_arg = {
     "MAX_STEPS": "max_steps",
     "MAX_SAMPLES": "max_samples",
@@ -100,13 +134,15 @@ env_to_arg = {
     "NUM_EVALUATORS": "num_evaluators",
     "LR": "lr",
     "BETA": "beta",
+    "PAIR_SE_MULTIPLIER": "pair_se_multiplier",
+    "PAIR_MARGIN": "pair_margin",
     "GPU_MEMORY_UTILIZATION": "gpu_memory_utilization",
 }
 for env_key, arg_key in env_to_arg.items():
     value = os.environ.get(env_key, "").strip()
     if not value:
         continue
-    args[arg_key] = float(value) if arg_key in {"lr", "beta", "gpu_memory_utilization"} else int(value)
+    args[arg_key] = float(value) if arg_key in {"lr", "beta", "pair_se_multiplier", "pair_margin", "gpu_memory_utilization"} else int(value)
 
 sft = {
     "mode": os.environ["SFT_MODE"],
@@ -171,7 +207,17 @@ print(scale)
 print(scale_cfg["problem_size"])
 print(scale_cfg["n_instance"])
 print(mode)
-print(lora)' "${CONFIG_PATH}" "${PROJECT_ROOT}")
+print(lora)
+print(str(data["rl"]["enabled"]).lower())
+print(grpo["seed"])
+print(data["rl"].get("initial_population_path") or "<generated>")
+print(data["task_rl_common"]["reward_mode"])
+print(data["task_rl_common"]["pair_se_multiplier"])
+print(data["task_rl_common"]["pair_margin"])
+print(grpo["learning_rate"])
+print(grpo["beta"])
+print(str(data["rl"]["save_final_lora"]).lower())
+print(str(data["rl"]["compress_history"]).lower())' "${CONFIG_PATH}" "${PROJECT_ROOT}")
 
 TARGET_GPU="${CFG_VALUES[0]}"
 TARGET_PORT="${CFG_VALUES[1]}"
@@ -186,24 +232,38 @@ TSP_PROBLEM_SIZE="${CFG_VALUES[9]}"
 TSP_INSTANCE_COUNT="${CFG_VALUES[10]}"
 SFT_MODE="${CFG_VALUES[11]}"
 SFT_LORA_PATH="${CFG_VALUES[12]}"
+ENABLE_GRPO="${CFG_VALUES[13]}"
+SEED="${CFG_VALUES[14]}"
+INITIAL_POPULATION_PATH="${CFG_VALUES[15]}"
+REWARD_MODE="${CFG_VALUES[16]}"
+PAIR_SE_MULTIPLIER="${CFG_VALUES[17]}"
+PAIR_MARGIN="${CFG_VALUES[18]}"
+GRPO_LR="${CFG_VALUES[19]}"
+GRPO_BETA="${CFG_VALUES[20]}"
+SAVE_FINAL_LORA="${CFG_VALUES[21]}"
+COMPRESS_HISTORY="${CFG_VALUES[22]}"
 
-for i in $(seq 1 "${RUNS_PER_VARIANT}"); do
-  RUN_ID="${RUN_ID_PREFIX}_run${i}_${RUN_ROOT_TS}"
-  RUN_LOG_DIR="${RUN_ROOT_BASE}/${RUN_ID}"
+RUN_ID="${RUN_ID_PREFIX}_${RUN_ROOT_TS}"
+RUN_LOG_DIR="${RUN_ROOT_BASE}/${EXPERIMENT_ID}${RUN_BATCH_ID:+/${RUN_BATCH_ID}}/${RUN_ID}"
 
-  echo "============================================================"
-  echo "EoH-RL TSP run ${i}/${RUNS_PER_VARIANT}: ${RUN_ID}"
-  echo "GPU=${TARGET_GPU} port=${TARGET_PORT} group_port=${TARGET_GROUP_PORT} init_sample_budget=${MAX_SAMPLE_NUMS} max_grpo_updates=${EOH_MAX_GENERATIONS} num_generations=${NUM_GENERATIONS} pop_size=${POP_SIZE}"
-  echo "task=${TSP_TASK} scale=${TSP_SCALE} problem_size=${TSP_PROBLEM_SIZE} n_instance=${TSP_INSTANCE_COUNT} sft_mode=${SFT_MODE} sft_lora=${SFT_LORA_PATH}"
-  echo "config=${CONFIG_PATH}"
+echo "============================================================"
+echo "EoH-RL TSP: ${RUN_ID}"
+echo "experiment=${EXPERIMENT_ID} variant=${VARIANT} grpo=${ENABLE_GRPO} seed=${SEED}"
+echo "initial_population=${INITIAL_POPULATION_PATH}"
+echo "reward_mode=${REWARD_MODE} lr=${GRPO_LR} beta=${GRPO_BETA}"
+echo "pair_se_multiplier=${PAIR_SE_MULTIPLIER} pair_margin=${PAIR_MARGIN}"
+echo "save_final_lora=${SAVE_FINAL_LORA} compress_history=${COMPRESS_HISTORY}"
+echo "GPU=${TARGET_GPU} port=${TARGET_PORT} group_port=${TARGET_GROUP_PORT} init_sample_budget=${MAX_SAMPLE_NUMS} max_grpo_updates=${EOH_MAX_GENERATIONS} num_generations=${NUM_GENERATIONS} pop_size=${POP_SIZE}"
+echo "task=${TSP_TASK} scale=${TSP_SCALE} problem_size=${TSP_PROBLEM_SIZE} n_instance=${TSP_INSTANCE_COUNT} sft_mode=${SFT_MODE} sft_lora=${SFT_LORA_PATH}"
+echo "config=${CONFIG_PATH}"
 
-  if [ "${DRY_RUN}" = "1" ]; then
-    continue
-  fi
+if [ "${DRY_RUN}" = "1" ]; then
+  exit 0
+fi
 
-  EOH_RL_CONFIG_PATH="${CONFIG_PATH}" \
-  EOH_RL_RUN_ID="${RUN_ID}" \
-  EOH_RL_RUN_LOG_DIR="${RUN_LOG_DIR}" \
-  PYTHONUNBUFFERED=1 \
-  "${PYTHON}" "${PROJECT_ROOT}/example/run_eoh/tsp/run_eoh_local_rl.py"
-done
+EOH_RL_CONFIG_PATH="${CONFIG_PATH}" \
+EOH_RL_RUN_ID="${RUN_ID}" \
+EOH_RL_RUN_LOG_DIR="${RUN_LOG_DIR}" \
+PYTHONHASHSEED="${SEED}" \
+PYTHONUNBUFFERED=1 \
+"${PYTHON}" "${PROJECT_ROOT}/example/run_eoh/tsp/run_eoh_local_rl.py"
