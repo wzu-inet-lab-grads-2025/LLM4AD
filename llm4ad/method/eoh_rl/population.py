@@ -49,12 +49,6 @@ def ast_distance(left, right) -> float:
 
 
 class Population:
-    """CALM-style single population.
-
-    `_population` is the full archive of valid, code-unique algorithms. Parent
-    selection uses only the top `pop_size` members after score sorting.
-    """
-
     def __init__(
         self,
         pop_size: int,
@@ -101,7 +95,7 @@ class Population:
 
     def register_evolved_function(self, func: Function) -> tuple[bool, bool, list[Function]]:
         before = list(self.active_population)
-        if not self._add(func):
+        if not self._add(func, reject_profile=True):
             return False, False, []
         self._generation += 1
         active = self.active_population
@@ -115,6 +109,10 @@ class Population:
 
     def has_duplicate_function(self, func: str | Function) -> bool:
         return any(self._same_member(existing, func) for existing in self._population)
+
+    def has_duplicate_profile(self, func: Function) -> bool:
+        key = profile_key(getattr(func, "_eoh_profile", None))
+        return bool(key) and any(profile_key(getattr(existing, "_eoh_profile", None)) == key for existing in self._population)
 
     def selection(self) -> Function:
         funcs = [func for func in self.active_population if self._has_finite_score(func)]
@@ -132,8 +130,8 @@ class Population:
         parent2 = max(candidates, key=lambda func: ast_distance(parent1, func))
         return [parent1, parent2]
 
-    def _add(self, func: Function) -> bool:
-        if not self._has_finite_score(func) or self.has_duplicate_function(func):
+    def _add(self, func: Function, *, reject_profile: bool = False) -> bool:
+        if not self._has_finite_score(func) or self.has_duplicate_function(func) or (reject_profile and self.has_duplicate_profile(func)):
             return False
         self._population.append(func)
         self._sort_in_place(self._population)
@@ -157,12 +155,7 @@ class Population:
 
     @staticmethod
     def _same_member(left: str | Function, right: str | Function) -> bool:
-        return Population._code_key(left) == Population._code_key(right)
-
-    @staticmethod
-    def _code_key(func: str | Function) -> str:
-        text = str(func or "").strip()
-        return "\n".join(line.rstrip() for line in text.splitlines()).strip()
+        return function_key(left) == function_key(right)
 
     @staticmethod
     def _has_finite_score(func: Function) -> bool:
@@ -171,3 +164,20 @@ class Population:
             return score is not None and math.isfinite(float(score))
         except Exception:
             return False
+
+
+def function_key(func: str | Function) -> str:
+    return "\n".join(line.rstrip() for line in str(func or "").strip().splitlines()).strip()
+
+
+def profile_key(profile) -> tuple[str, ...]:
+    if not isinstance(profile, (list, tuple)) or not profile:
+        return ()
+    try:
+        values = [float(value) for value in profile]
+    except (TypeError, ValueError):
+        return ()
+    return tuple(format(value, ".12g") for value in values) if all(math.isfinite(value) for value in values) else ()
+
+
+__all__ = ["Population", "ast_distance", "function_key", "profile_key"]

@@ -101,18 +101,19 @@ class EoHSampler:
 
     def parse_response_record(self, response: str) -> dict:
         text = str(response or "").strip()
+        contract = self._contract_flags(text)
         if not text:
-            return self._failure("no_output")
+            return {**self._failure("no_output"), **contract}
 
         strategy = self.trim_strategy_from_response(text)
         if strategy and self._strategy_has_metadata_leak(strategy):
-            return self._failure("metadata_leak", strategy=strategy)
+            return {**self._failure("metadata_leak", strategy=strategy), **contract}
 
         python = self.extract_python_from_response(text)
         if not python:
-            return self._failure("missing_function", strategy=strategy)
+            return {**self._failure("missing_function", strategy=strategy), **contract}
 
-        return self._parse_record(strategy, python)
+        return {**self._parse_record(strategy, python), **contract}
 
     @classmethod
     def trim_strategy_from_response(cls, response: str) -> str | None:
@@ -189,6 +190,13 @@ class EoHSampler:
             if idea:
                 return idea
         return None
+
+    @classmethod
+    def _contract_flags(cls, text: str) -> dict[str, bool]:
+        prefix = re.split(r"```|^\s*def\s+", str(text or ""), maxsplit=1, flags=re.M)[0]
+        ideas = [match.strip() for match in re.findall(r"\{\{(.*?)\}\}", prefix, flags=re.S) if match.strip()]
+        exact = re.fullmatch(r"\s*\{\{.+?\}\}\s*```python\s*\n.*?```\s*", str(text or ""), flags=re.S)
+        return {"idea_contract_success": len(ideas) == 1, "format_contract_success": len(ideas) == 1 and str(text or "").count("```") == 2 and exact is not None}
 
     @staticmethod
     def _trim_to_parseable_python(snippet: str) -> str:

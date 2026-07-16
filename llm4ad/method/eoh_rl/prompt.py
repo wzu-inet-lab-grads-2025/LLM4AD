@@ -30,9 +30,11 @@ class EoHPrompt:
         parent_codes: List[str] | None = None,
         parent_ids: List[int] | None = None,
         population_best_score: float | None = None,
+        population_best_profile: List[float] | None = None,
         group_size: int = 1,
-        reward_contract: str = "vc_pair_v1",
+        reward_contract: str = "vc_pair_v2",
         system_prompt: str | None = None,
+        sampling_seed: int | None = None,
     ) -> Dict:
         user_prompt = str(prompt or "").strip()
         prompt_id_text = str(prompt_id or "").strip()
@@ -56,8 +58,10 @@ class EoHPrompt:
             "parent_codes": list(parent_codes or []),
             "parent_ids": None if parent_ids is None else list(parent_ids),
             "population_best_score": population_best_score,
+            "population_best_profile": None if population_best_profile is None else list(population_best_profile),
             "group_size": int(group_size),
-            "reward_contract": str(reward_contract or "vc_pair_v1"),
+            "reward_contract": str(reward_contract or "vc_pair_v2"),
+            "sampling_seed": None if sampling_seed is None else int(sampling_seed),
         }
 
     @staticmethod

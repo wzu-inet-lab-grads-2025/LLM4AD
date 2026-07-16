@@ -21,6 +21,7 @@ ENABLE_GRPO="${ENABLE_GRPO:-1}"
 SEED="${SEED:-42}"
 INITIAL_POPULATION_PATH="${INITIAL_POPULATION_PATH:-}"
 REWARD_MODE="${REWARD_MODE:-vc_pair}"
+TRAINER_LIFECYCLE="${TRAINER_LIFECYCLE:-persistent}"
 RUN_ID_PREFIX="${RUN_ID_PREFIX:-${EXPERIMENT_ID}_${VARIANT}_TSP${TSP_LABEL}_seed${SEED}}"
 
 LOCAL_MODEL_PATH="${LOCAL_MODEL_PATH:-/home/yuanyilun/models/deepseek-coder-7b-instruct-v1.5}"
@@ -82,13 +83,14 @@ EOH_RL_RUNTIME_OVERRIDES_JSON="$(
   NUM_EVALUATORS="${NUM_EVALUATORS:-}" \
   LR="${LR:-}" \
   BETA="${BETA:-}" \
-  PAIR_SE_MULTIPLIER="${PAIR_SE_MULTIPLIER:-}" \
-  PAIR_MARGIN="${PAIR_MARGIN:-}" \
+  PAIR_CONFIDENCE="${PAIR_CONFIDENCE:-}" \
+  PAIR_DELTA="${PAIR_DELTA:-}" \
   GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}" \
   ENABLE_GRPO="${ENABLE_GRPO}" \
   SEED="${SEED}" \
   INITIAL_POPULATION_PATH="${INITIAL_POPULATION_PATH}" \
   REWARD_MODE="${REWARD_MODE}" \
+  TRAINER_LIFECYCLE="${TRAINER_LIFECYCLE}" \
   SAVE_FINAL_LORA="${SAVE_FINAL_LORA:-}" \
   COMPRESS_HISTORY="${COMPRESS_HISTORY:-}" \
   "${PYTHON}" -c 'import json, os, sys
@@ -119,6 +121,7 @@ args["enable_grpo"] = enabled in {"1", "true"}
 args["seed"] = int(os.environ["SEED"])
 args["initial_population_path"] = os.environ["INITIAL_POPULATION_PATH"].strip() or None
 args["reward_mode"] = os.environ["REWARD_MODE"].strip()
+args["trainer_lifecycle"] = os.environ["TRAINER_LIFECYCLE"].strip()
 for env_key, arg_key in {"SAVE_FINAL_LORA": "save_final_lora", "COMPRESS_HISTORY": "compress_history"}.items():
     value = os.environ.get(env_key, "").strip().lower()
     if not value:
@@ -134,15 +137,15 @@ env_to_arg = {
     "NUM_EVALUATORS": "num_evaluators",
     "LR": "lr",
     "BETA": "beta",
-    "PAIR_SE_MULTIPLIER": "pair_se_multiplier",
-    "PAIR_MARGIN": "pair_margin",
+    "PAIR_CONFIDENCE": "pair_confidence",
+    "PAIR_DELTA": "pair_delta",
     "GPU_MEMORY_UTILIZATION": "gpu_memory_utilization",
 }
 for env_key, arg_key in env_to_arg.items():
     value = os.environ.get(env_key, "").strip()
     if not value:
         continue
-    args[arg_key] = float(value) if arg_key in {"lr", "beta", "pair_se_multiplier", "pair_margin", "gpu_memory_utilization"} else int(value)
+    args[arg_key] = float(value) if arg_key in {"lr", "beta", "pair_confidence", "pair_delta", "gpu_memory_utilization"} else int(value)
 
 sft = {
     "mode": os.environ["SFT_MODE"],
@@ -212,8 +215,9 @@ print(str(data["rl"]["enabled"]).lower())
 print(grpo["seed"])
 print(data["rl"].get("initial_population_path") or "<generated>")
 print(data["task_rl_common"]["reward_mode"])
-print(data["task_rl_common"]["pair_se_multiplier"])
-print(data["task_rl_common"]["pair_margin"])
+print(grpo["trainer_lifecycle"])
+print(data["task_rl_common"]["pair_confidence"])
+print(data["task_rl_common"]["pair_delta"])
 print(grpo["learning_rate"])
 print(grpo["beta"])
 print(str(data["rl"]["save_final_lora"]).lower())
@@ -236,12 +240,13 @@ ENABLE_GRPO="${CFG_VALUES[13]}"
 SEED="${CFG_VALUES[14]}"
 INITIAL_POPULATION_PATH="${CFG_VALUES[15]}"
 REWARD_MODE="${CFG_VALUES[16]}"
-PAIR_SE_MULTIPLIER="${CFG_VALUES[17]}"
-PAIR_MARGIN="${CFG_VALUES[18]}"
-GRPO_LR="${CFG_VALUES[19]}"
-GRPO_BETA="${CFG_VALUES[20]}"
-SAVE_FINAL_LORA="${CFG_VALUES[21]}"
-COMPRESS_HISTORY="${CFG_VALUES[22]}"
+TRAINER_LIFECYCLE="${CFG_VALUES[17]}"
+PAIR_CONFIDENCE="${CFG_VALUES[18]}"
+PAIR_DELTA="${CFG_VALUES[19]}"
+GRPO_LR="${CFG_VALUES[20]}"
+GRPO_BETA="${CFG_VALUES[21]}"
+SAVE_FINAL_LORA="${CFG_VALUES[22]}"
+COMPRESS_HISTORY="${CFG_VALUES[23]}"
 
 RUN_ID="${RUN_ID_PREFIX}_${RUN_ROOT_TS}"
 RUN_LOG_DIR="${RUN_ROOT_BASE}/${EXPERIMENT_ID}${RUN_BATCH_ID:+/${RUN_BATCH_ID}}/${RUN_ID}"
@@ -251,7 +256,7 @@ echo "EoH-RL TSP: ${RUN_ID}"
 echo "experiment=${EXPERIMENT_ID} variant=${VARIANT} grpo=${ENABLE_GRPO} seed=${SEED}"
 echo "initial_population=${INITIAL_POPULATION_PATH}"
 echo "reward_mode=${REWARD_MODE} lr=${GRPO_LR} beta=${GRPO_BETA}"
-echo "pair_se_multiplier=${PAIR_SE_MULTIPLIER} pair_margin=${PAIR_MARGIN}"
+echo "trainer_lifecycle=${TRAINER_LIFECYCLE} pair_confidence=${PAIR_CONFIDENCE} pair_delta=${PAIR_DELTA}"
 echo "save_final_lora=${SAVE_FINAL_LORA} compress_history=${COMPRESS_HISTORY}"
 echo "GPU=${TARGET_GPU} port=${TARGET_PORT} group_port=${TARGET_GROUP_PORT} init_sample_budget=${MAX_SAMPLE_NUMS} max_grpo_updates=${EOH_MAX_GENERATIONS} num_generations=${NUM_GENERATIONS} pop_size=${POP_SIZE}"
 echo "task=${TSP_TASK} scale=${TSP_SCALE} problem_size=${TSP_PROBLEM_SIZE} n_instance=${TSP_INSTANCE_COUNT} sft_mode=${SFT_MODE} sft_lora=${SFT_LORA_PATH}"

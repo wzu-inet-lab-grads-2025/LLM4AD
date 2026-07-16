@@ -43,6 +43,8 @@ def operator_stats(events: list[dict]) -> dict:
             "parent_improve_only_count": sum(bool(row.get("beats_parent")) and not bool(row.get("beats_frontier")) for row in valid),
             "frontier_improve_count": count("beats_frontier", valid),
             "valid_non_improving_count": sum(not bool(row.get("performance_improved")) for row in valid),
+            "archive_duplicate_count": count("archive_duplicate"),
+            "profile_duplicate_count": count("profile_duplicate"),
             "paired_outcome_counts": {
                 outcome: sum(row.get("paired_outcome") == outcome for row in valid)
                 for outcome in ("positive", "neutral", "negative")
@@ -185,11 +187,13 @@ class EoH:
         self._initial_evaluation_count = 0
         self._online_funnel_counts = {
             "completion_count": 0,
-            "contract_valid_count": 0,
+            "idea_contract_count": 0,
+            "format_contract_count": 0,
+            "code_parse_count": 0,
+            "full_contract_count": 0,
             "evaluation_count": 0,
-            "execution_valid_count": 0,
+            "exec_success_count": 0,
             "population_eligible_count": 0,
-            "archive_novel_count": 0,
         }
         self._paired_parent_evaluation_count = 0
         self._best_curve: list[dict] = []
@@ -246,15 +250,12 @@ class EoH:
         return -float(score) if self._minimize() else float(score)
 
     def _best_population_score(self):
-        candidates = [
-            func
-            for func in self._population.population
-            if getattr(func, "score", None) is not None and math.isfinite(float(func.score))
-        ]
-        if not candidates:
-            return None
-        best = max(candidates, key=lambda func: self._utility(func.score))
-        return best.score
+        best = self._best_population_member()
+        return None if best is None else best.score
+
+    def _best_population_member(self):
+        candidates = [func for func in self._population.population if getattr(func, "score", None) is not None and math.isfinite(float(func.score))]
+        return max(candidates, key=lambda func: self._utility(func.score)) if candidates else None
 
     def _continue_updates(self) -> bool:
         if self._max_grpo_updates is not None and self._grpo_update_count >= self._max_grpo_updates:
@@ -294,8 +295,10 @@ class EoH:
         else:
             raise RuntimeError(f"unsupported EoH operator: {op}")
         parent = max(parents, key=lambda item: self._utility(item.score))
+        frontier = self._best_population_member()
         parent_ids = self._parent_ids_for_samples(parents)
         parent_profile = self._current_parent_profile(parent) if getattr(self._reward_fn, "reward_mode", None) == "vc_pair" else getattr(parent, "_eoh_profile", None)
+        frontier_profile = self._current_parent_profile(frontier) if frontier is not None and getattr(self._reward_fn, "reward_mode", None) == "vc_pair" else getattr(frontier, "_eoh_profile", None)
         prompt_id = f"rl{update_id:03d}_{op}" if self._prompts_per_update == 1 and record_index == 0 else f"rl{update_id:03d}_{record_index:03d}_{op}"
         return EoHPrompt.build_prompt_record(
             prompt_id=prompt_id,
@@ -306,9 +309,10 @@ class EoH:
             parent_best_id=parent_ids[parents.index(parent)],
             parent_codes=[str(parent) for parent in parents],
             parent_ids=parent_ids,
-            population_best_score=self._best_population_score(),
+            population_best_score=None if frontier is None else frontier.score,
+            population_best_profile=frontier_profile,
             group_size=int(self._samples_per_prompt),
-            reward_contract="vc_pair_v1" if getattr(self._reward_fn, "reward_mode", None) == "vc_pair" else "aggregate_v1",
+            reward_contract="vc_pair_v2" if getattr(self._reward_fn, "reward_mode", None) == "vc_pair" else "aggregate_v1",
             system_prompt=EoHPrompt.get_system_prompt(),
         )
 
@@ -429,6 +433,8 @@ class EoH:
             setattr(func, "_eoh_profile_current", True)
         blocked_by_gate = (
             bool(row.get("exact_parent_copy"))
+            or bool(row.get("archive_duplicate"))
+            or bool(row.get("profile_duplicate"))
             or bool(row.get("random_algo"))
             or bool(row.get("score_metadata_leak"))
             or not bool(row.get("validity", True))
@@ -551,6 +557,7 @@ class EoH:
             enable_ast_gate=self._enable_ast_gate,
             training_enabled=self._enable_grpo,
             known_functions=[str(func) for func in self._population.population],
+            known_profiles=[getattr(func, "_eoh_profile", None) for func in self._population.population],
         )
         policy_call_elapsed = time.time() - train_started
         if not result.get("executed"):
@@ -622,11 +629,12 @@ class EoH:
             f"active={len(self._population)}/{self._pop_size} "
             f"op={operator_summary} "
             f"completion={total} "
-            f"contract={funnel.get('contract_valid_count', 0)} "
+            f"idea={funnel.get('idea_contract_count', 0)} "
+            f"parse={funnel.get('code_parse_count', 0)} "
+            f"contract={funnel.get('full_contract_count', 0)} "
             f"evaluated={funnel.get('evaluation_count', 0)} "
-            f"exec={funnel.get('execution_valid_count', 0)} "
+            f"exec={funnel.get('exec_success_count', 0)} "
             f"eligible={funnel.get('population_eligible_count', 0)} "
-            f"novel={funnel.get('archive_novel_count', 0)} "
             f"parent_only={summary.get('parent_improve_only_count', 0)} "
             f"frontier={summary.get('frontier_improve_count', 0)} "
             f"non_improve={summary.get('valid_non_improving_count', 0)} "

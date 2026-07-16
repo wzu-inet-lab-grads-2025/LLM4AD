@@ -24,13 +24,15 @@ class EoHRLArgs:
     epsilon: float = 0.15
     epsilon_high: float = 0.28
     seed: int = 42
+    trainer_lifecycle: str = "persistent"
     initial_population_path: str | None = None
     reward_mode: str = "vc_pair"
-    pair_se_multiplier: float = 1.0
-    pair_margin: float = 1.0e-4
+    pair_confidence: float = 0.95
+    pair_delta: float = 1.0e-4
     pair_positive_reward: float = 1.0
     pair_neutral_reward: float = 0.0
-    pair_negative_reward: float = -0.5
+    pair_negative_reward: float = -0.2
+    pair_frontier_bonus: float = 0.25
     save_final_lora: bool = False
     compress_history: bool = True
 
@@ -100,14 +102,18 @@ def apply_runtime_defaults(cfg: dict) -> dict:
             "reward_none_return": -0.60,
             "reward_random": -0.70,
             "reward_leak": -0.70,
+            "reward_exact_copy": -1.00,
+            "reward_archive_duplicate": -0.75,
+            "reward_profile_duplicate": -0.50,
             "epsilon": 1.0e-4,
             "q3_scale": 0.50,
             "reward_mode": args.reward_mode,
-            "pair_se_multiplier": args.pair_se_multiplier,
-            "pair_margin": args.pair_margin,
+            "pair_confidence": args.pair_confidence,
+            "pair_delta": args.pair_delta,
             "pair_positive_reward": args.pair_positive_reward,
             "pair_neutral_reward": args.pair_neutral_reward,
             "pair_negative_reward": args.pair_negative_reward,
+            "pair_frontier_bonus": args.pair_frontier_bonus,
         },
         cfg.get("task_rl_common"),
     )
@@ -152,6 +158,7 @@ def _sft_defaults(args: EoHRLArgs, user_sft: dict | None) -> dict:
 def _grpo_defaults(args: EoHRLArgs, server_port: int) -> dict:
     return {
         "prompts_per_update": args.n_prompts,
+        "trainer_lifecycle": args.trainer_lifecycle,
         "use_vllm": True,
         "vllm_mode": "colocate",
         "vllm_model_impl": "vllm",

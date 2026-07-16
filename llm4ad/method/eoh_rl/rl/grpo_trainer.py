@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import gc
 import inspect
 import json
@@ -16,7 +17,8 @@ from typing import Any
 
 import torch
 
-from ....base import LLM, SampleTrimmer, TextFunctionProgramConverter
+from ....base import LLM
+from ..population import function_key, profile_key
 from ..prompt import EoHPrompt
 from ..sampler import EoHSampler
 from .sft_train import assert_lora_compatible as assert_adapter_compatible
@@ -114,30 +116,48 @@ class EoHReward:
     reward_none_return: float = -0.60
     reward_random: float = -0.70
     reward_leak: float = -0.70
+    reward_exact_copy: float = -1.00
+    reward_archive_duplicate: float = -0.75
+    reward_profile_duplicate: float = -0.50
     epsilon: float = 1.0e-4
     q3_scale: float = 0.50
     reward_mode: str = "vc_pair"
-    pair_se_multiplier: float = 1.0
-    pair_margin: float = 1.0e-4
+    pair_confidence: float = 0.95
+    pair_delta: float = 1.0e-4
     pair_positive_reward: float = 1.0
     pair_neutral_reward: float = 0.0
-    pair_negative_reward: float = -0.5
+    pair_negative_reward: float = -0.2
+    pair_frontier_bonus: float = 0.25
 
     def __post_init__(self):
         self.minimize = _bool(self.minimize)
         self.detect_randomness = _bool(self.detect_randomness)
-        self.pair_se_multiplier = float(self.pair_se_multiplier)
-        self.pair_margin = float(self.pair_margin)
-        self.pair_positive_reward = float(self.pair_positive_reward)
-        self.pair_neutral_reward = float(self.pair_neutral_reward)
-        self.pair_negative_reward = float(self.pair_negative_reward)
+        numeric = (
+            "reward_parse_fail", "reward_exec_fail", "reward_none_return", "reward_random",
+            "reward_leak", "reward_exact_copy", "reward_archive_duplicate", "reward_profile_duplicate",
+            "pair_confidence", "pair_delta", "pair_positive_reward", "pair_neutral_reward",
+            "pair_negative_reward", "pair_frontier_bonus",
+        )
+        for key in numeric:
+            setattr(self, key, float(getattr(self, key)))
         if self.reward_mode not in {"vc_pair", "aggregate", "validity_only", "performance_shuffled"}:
             raise ValueError(f"unsupported reward_mode: {self.reward_mode}")
-        values = (self.pair_se_multiplier, self.pair_margin, self.pair_positive_reward, self.pair_neutral_reward, self.pair_negative_reward)
-        if not all(math.isfinite(value) for value in values) or self.pair_se_multiplier < 0.0 or self.pair_margin < 0.0:
-            raise ValueError("VC-PAIR configuration must be finite with non-negative threshold terms")
+        blocked = (
+            self.reward_parse_fail, self.reward_exec_fail, self.reward_none_return,
+            self.reward_random, self.reward_leak, self.reward_exact_copy,
+            self.reward_archive_duplicate, self.reward_profile_duplicate,
+        )
+        values = (
+            self.pair_confidence, self.pair_delta, self.pair_positive_reward,
+            self.pair_neutral_reward, self.pair_negative_reward, self.pair_frontier_bonus,
+            *blocked,
+        )
+        if not all(math.isfinite(value) for value in values) or not 0.0 < self.pair_confidence < 1.0 or self.pair_delta < 0.0 or self.pair_frontier_bonus < 0.0:
+            raise ValueError("VC-PAIR configuration is invalid")
         if not self.pair_positive_reward > self.pair_neutral_reward > self.pair_negative_reward:
             raise ValueError("VC-PAIR rewards must satisfy positive > neutral > negative")
+        if max(blocked) >= 2.0 * self.pair_negative_reward:
+            raise ValueError("blocked rewards must be below the full VC-PAIR negative range")
 
     def invalid_result(self, label: str, reward: float) -> dict:
         return {
@@ -154,9 +174,11 @@ def build_reward_fn_from_task_rl(task_rl: dict, logger=None) -> EoHReward:
         "minimize": False, "detect_randomness": True,
         "reward_parse_fail": -1.00, "reward_exec_fail": -0.80,
         "reward_none_return": -0.60, "reward_random": -0.70, "reward_leak": -0.70,
+        "reward_exact_copy": -1.00, "reward_archive_duplicate": -0.75, "reward_profile_duplicate": -0.50,
         "epsilon": 1.0e-4, "q3_scale": 0.50, "reward_mode": "vc_pair",
-        "pair_se_multiplier": 1.0, "pair_margin": 1.0e-4,
-        "pair_positive_reward": 1.0, "pair_neutral_reward": 0.0, "pair_negative_reward": -0.5,
+        "pair_confidence": 0.95, "pair_delta": 1.0e-4,
+        "pair_positive_reward": 1.0, "pair_neutral_reward": 0.0, "pair_negative_reward": -0.2,
+        "pair_frontier_bonus": 0.25,
     }.items()})
     if logger is not None:
         logger.info("奖励配置: %s", vars(reward))
@@ -182,10 +204,12 @@ def _record(raw: dict) -> dict:
         "parent_best_profile": raw.get("parent_best_profile"),
         "parent_best_id": raw.get("parent_best_id"),
         "population_best_score": _float(raw.get("population_best_score")),
+        "population_best_profile": raw.get("population_best_profile"),
         "parent_codes": _as_list(raw.get("parent_codes")),
         "parent_ids": None if raw.get("parent_ids") is None else _as_list(raw.get("parent_ids")),
         "group_size": int(raw.get("group_size") or 1),
-        "reward_contract": str(raw.get("reward_contract") or "vc_pair_v1"),
+        "reward_contract": str(raw.get("reward_contract") or "vc_pair_v2"),
+        "sampling_seed": _int(raw.get("sampling_seed")),
     }
 
 
@@ -209,6 +233,17 @@ def is_population_eligible_event(event: dict) -> bool:
         and not bool(event.get("random_algo"))
         and not bool(event.get("score_metadata_leak"))
         and not bool(event.get("exact_parent_copy"))
+        and not bool(event.get("archive_duplicate"))
+        and not bool(event.get("profile_duplicate"))
+    )
+
+
+def _is_quality_valid_event(event: dict) -> bool:
+    return (
+        bool(event.get("code_parse_success"))
+        and bool(event.get("exec_success"))
+        and not bool(event.get("random_algo"))
+        and not bool(event.get("score_metadata_leak"))
     )
 
 
@@ -216,11 +251,13 @@ def event_funnel(events: list[dict]) -> dict:
     total = len(events)
     counts = {
         "completion_count": total,
-        "contract_valid_count": sum(bool(row.get("parse_success")) for row in events),
+        "idea_contract_count": sum(bool(row.get("idea_contract_success")) for row in events),
+        "format_contract_count": sum(bool(row.get("format_contract_success")) for row in events),
+        "code_parse_count": sum(bool(row.get("code_parse_success")) for row in events),
+        "full_contract_count": sum(bool(row.get("full_contract_success")) for row in events),
         "evaluation_count": sum(bool(row.get("evaluation_attempted")) for row in events),
-        "execution_valid_count": sum(bool(row.get("exec_success")) for row in events),
+        "exec_success_count": sum(bool(row.get("exec_success")) for row in events),
         "population_eligible_count": sum(is_population_eligible_event(row) for row in events),
-        "archive_novel_count": sum(is_population_eligible_event(row) and not bool(row.get("archive_duplicate")) for row in events),
     }
     rates = {
         key.replace("_count", "_rate"): value / total if total else 0.0
@@ -244,6 +281,7 @@ class EoHGRPOReward:
         reward_eval_workers: int = 1,
         enable_ast_gate: bool = False,
         known_functions: list[str] | None = None,
+        known_profiles: list[list[float]] | None = None,
     ):
         self.records = [_record(record) for record in records]
         self.evaluator = evaluator
@@ -253,8 +291,9 @@ class EoHGRPOReward:
         self.reward_eval_workers = max(1, int(reward_eval_workers or 1))
         self.__name__ = "eohrl_graded_reward"
         self._parser = EoHSampler(None, template_program, enable_ast_gate=enable_ast_gate)
-        self._seen_codes = {self._normalize_code(code) for code in known_functions or []}
+        self._seen_codes = {function_key(code) for code in known_functions or []}
         self._seen_codes.discard("")
+        self._seen_profiles = {key for values in known_profiles or [] if (key := profile_key(values))}
         self._prompt_to_meta = {record["prompt"]: record for record in self.records}
         self._rows: list[dict] = []
         self._candidates: list[dict] = []
@@ -298,9 +337,11 @@ class EoHGRPOReward:
                 pending.append((idx, item))
         for idx, result in self._evaluate_pending(pending):
             rewards[idx] = self._finish(rows[idx], result)
+        self._apply_quality_gate(rows, rewards)
         self._shuffle_performance_rewards(rows, rewards)
         final = [float(value if value is not None else self.reward_config.reward_parse_fail) for value in rewards]
         for row, reward in zip(rows, final):
+            self._reward_components(row, reward)
             row["reward"] = reward
             self.reward_values.append(reward)
         self._rows.extend(rows)
@@ -326,9 +367,16 @@ class EoHGRPOReward:
         events = self.events()
         valid = [event for event in events if is_population_eligible_event(event)]
         groups: dict[str, list[float]] = {}
+        group_valid: dict[str, int] = {}
+        group_eligible: dict[str, int] = {}
         for event in events:
-            groups.setdefault(str(event.get("prompt_id") or ""), []).append(float(event.get("reward") or 0.0))
+            prompt_id = str(event.get("prompt_id") or "")
+            groups.setdefault(prompt_id, []).append(float(event.get("reward") or 0.0))
+            group_valid[prompt_id] = group_valid.get(prompt_id, 0) + _is_quality_valid_event(event)
+            group_eligible[prompt_id] = group_eligible.get(prompt_id, 0) + is_population_eligible_event(event)
         zero_std = sum(_basic_stats(values)["std"] == 0.0 for values in groups.values())
+        group_valid_counts = list(group_valid.values())
+        group_eligible_counts = list(group_eligible.values())
         reward_labels: dict[str, int] = {}
         for event in events:
             label = str(event.get("reward_label") or "unknown")
@@ -340,13 +388,18 @@ class EoHGRPOReward:
             "parent_improve_only_count": sum(bool(event.get("beats_parent")) and not bool(event.get("beats_frontier")) for event in valid),
             "frontier_improve_count": sum(bool(event.get("beats_frontier")) for event in valid),
             "valid_non_improving_count": sum(not bool(event.get("performance_improved")) for event in valid),
-            "archive_duplicate_count": sum(bool(event.get("archive_duplicate")) for event in valid),
+            "archive_duplicate_count": sum(bool(event.get("archive_duplicate")) for event in events),
+            "profile_duplicate_count": sum(bool(event.get("profile_duplicate")) for event in events),
             "paired_outcome_counts": {
                 outcome: sum(event.get("paired_outcome") == outcome for event in valid)
                 for outcome in ("positive", "neutral", "negative")
             },
             "paired_mean_stats": _basic_stats([float(event["paired_mean"]) for event in valid if event.get("paired_mean") is not None]),
             "paired_se_stats": _basic_stats([float(event["paired_se"]) for event in valid if event.get("paired_se") is not None]),
+            "group_valid_count_stats": _basic_stats(group_valid_counts),
+            "group_eligible_count_stats": _basic_stats(group_eligible_counts),
+            "quality_gate_active_group_count": sum(count >= 2 for count in group_valid_counts),
+            "quality_gate_active_group_rate": sum(count >= 2 for count in group_valid_counts) / max(len(group_valid_counts), 1),
             "frac_reward_zero_std": zero_std / max(len(groups), 1),
             "reward_stats": _basic_stats(self.reward_values),
             "reward_label_counts": reward_labels,
@@ -369,15 +422,27 @@ class EoHGRPOReward:
             "survived_main_population": False,
             "blocked_from_population": True,
             "evaluation_attempted": False,
+            "idea_contract_success": False,
+            "format_contract_success": False,
+            "code_parse_success": False,
+            "full_contract_success": False,
         }
         if not str(completion or "").strip():
-            row.update(self._failure("no_output", parse_success=False))
+            row.update(self._failure("no_output", code_parse_success=False))
             return row, None
         parsed = self._parser.parse_response_record(completion)
-        row.update(strategy=parsed.get("strategy"))
+        row.update(
+            strategy=parsed.get("strategy"),
+            idea_contract_success=bool(parsed.get("idea_contract_success")),
+            format_contract_success=bool(parsed.get("format_contract_success")),
+        )
         if parsed.get("failure_label"):
-            row.update(self._failure(str(parsed.get("failure_label") or "missing_function"), parse_success=False))
+            row.update(self._failure(str(parsed.get("failure_label") or "missing_function"), code_parse_success=False))
             return row, None
+        row.update(
+            code_parse_success=True,
+            full_contract_success=bool(row["idea_contract_success"] and row["format_contract_success"]),
+        )
         return row, {"meta": meta, "func": parsed["func"], "program": parsed["program"]}
 
     def _evaluate_one(self, program) -> dict:
@@ -437,10 +502,9 @@ class EoHGRPOReward:
         row.update(function=str(func), program=program_text, eval_time=result.get("eval_time"), evaluation_attempted=True, exec_success=False)
         score = _float(result.get("score"))
         if score is None or not math.isfinite(score):
-            # Distinguish runtime exception (-0.80) from logic error / returns None (-0.60)
             diag = result.get("diag") or {}
             r = self.reward_config.reward_exec_fail if diag.get("error") else self.reward_config.reward_none_return
-            row.update(self._failure("non_finite_score", parse_success=True, reward=r))
+            row.update(self._failure("non_finite_score", code_parse_success=True, reward=r))
             self._candidates.append({"row": row, "func": func, "program_str": program_text, "score": None, "eval_time": result.get("eval_time"), "diag": diag, "meta": meta})
             return r
         random_algo = bool(self.reward_config.detect_randomness and _check_randomness(program_text))
@@ -448,56 +512,127 @@ class EoHGRPOReward:
         parent_copy = self._is_exact_parent_copy(str(func), meta.get("parent_codes") or [])
         if random_algo or score_leak or parent_copy:
             label = "exact_parent_copy" if parent_copy else "metadata_leak" if score_leak else "randomness_detected"
-            r = self.reward_config.reward_random if random_algo else self.reward_config.reward_leak
-            row.update(self._failure(label, parse_success=True, reward=r))
+            r = self.reward_config.reward_exact_copy if parent_copy else self.reward_config.reward_random if random_algo else self.reward_config.reward_leak
+            row.update(self._failure(label, code_parse_success=True, reward=r))
             row.update(score=score, exec_success=True, random_algo=random_algo, score_metadata_leak=score_leak, exact_parent_copy=parent_copy)
             self._candidates.append({"row": row, "func": func, "program_str": program_text, "score": score, "eval_time": result.get("eval_time"), "diag": result.get("diag"), "meta": meta})
             return r
+
+        profile = (result.get("diag") or {}).get("performance_profile")
         perf = self._compute_perf_reward(score, meta.get("parent_best_score"), meta.get("population_best_score"))
-        code_key = self._normalize_code(str(func))
+        code_key = function_key(func)
         archive_duplicate = bool(code_key and code_key in self._seen_codes)
+        candidate_profile_key = profile_key(profile)
+        profile_duplicate = bool(candidate_profile_key and candidate_profile_key in self._seen_profiles)
         if code_key:
             self._seen_codes.add(code_key)
+        if candidate_profile_key:
+            self._seen_profiles.add(candidate_profile_key)
         mode = self.reward_config.reward_mode
         if mode == "vc_pair":
             paired = compare_profiles(
-                (result.get("diag") or {}).get("performance_profile"),
+                profile,
                 meta.get("parent_best_profile"),
                 minimize=self.reward_config.minimize,
-                se_multiplier=self.reward_config.pair_se_multiplier,
-                margin=self.reward_config.pair_margin,
+                confidence=self.reward_config.pair_confidence,
+                delta=self.reward_config.pair_delta,
             )
             if not math.isclose(paired["paired_candidate_mean"], score, rel_tol=1.0e-9, abs_tol=1.0e-9):
                 raise ValueError("VC-PAIR candidate profile mean does not match its score")
             if not math.isclose(paired["paired_parent_mean"], float(meta["parent_best_score"]), rel_tol=1.0e-9, abs_tol=1.0e-9):
                 raise ValueError("VC-PAIR parent profile mean does not match its score")
             outcome = paired["paired_outcome"]
+            frontier = compare_profiles(
+                profile,
+                meta.get("population_best_profile"),
+                minimize=self.reward_config.minimize,
+                confidence=self.reward_config.pair_confidence,
+                delta=self.reward_config.pair_delta,
+            )
+            frontier_positive = frontier["paired_outcome"] == "positive"
+            strength = 1.0 + paired["paired_evidence_strength"]
+            quality_reward = {
+                "positive": self.reward_config.pair_positive_reward * strength,
+                "neutral": self.reward_config.pair_neutral_reward,
+                "negative": self.reward_config.pair_negative_reward * strength,
+            }[outcome]
+            frontier_bonus = self.reward_config.pair_frontier_bonus * (1.0 + frontier["paired_evidence_strength"]) if frontier_positive else 0.0
             perf.update(
                 paired,
-                reward={
-                    "positive": self.reward_config.pair_positive_reward,
-                    "neutral": self.reward_config.pair_neutral_reward,
-                    "negative": self.reward_config.pair_negative_reward,
-                }[outcome],
+                **{f"frontier_{key}": value for key, value in frontier.items()},
+                reward=quality_reward + frontier_bonus,
                 reward_label=f"pair_{outcome}",
                 reward_quadrant=outcome,
+                quality_reward=quality_reward,
+                frontier_bonus=frontier_bonus,
+                beats_parent=outcome == "positive",
+                beats_frontier=frontier_positive,
+                ties_parent=outcome == "neutral",
                 performance_improved=outcome == "positive",
             )
         elif mode == "validity_only":
             perf.update(reward=1.0, reward_label="validity_only")
+        if archive_duplicate or profile_duplicate:
+            perf.update(
+                reward=self.reward_config.reward_archive_duplicate if archive_duplicate else self.reward_config.reward_profile_duplicate,
+                reward_label="duplicate_archive" if archive_duplicate else "duplicate_profile",
+                reward_quadrant="duplicate",
+                quality_reward=0.0,
+                frontier_bonus=0.0,
+                performance_improved=False,
+            )
         row.update(
             **perf,
             validity=perf.get("failure_label") is None,
             exec_success=True,
-            parse_success=True,
+            code_parse_success=True,
             random_algo=False,
             score_metadata_leak=False,
             exact_parent_copy=False,
             archive_duplicate=archive_duplicate,
-            blocked_from_population=perf.get("failure_label") is not None,
+            profile_duplicate=profile_duplicate,
+            blocked_from_population=bool(perf.get("failure_label") or archive_duplicate or profile_duplicate),
         )
         self._candidates.append({"row": row, "func": func, "program_str": program_text, "score": score, "eval_time": result.get("eval_time"), "diag": result.get("diag"), "meta": meta})
         return float(perf["reward"])
+
+    def _apply_quality_gate(self, rows: list[dict], rewards: list) -> None:
+        groups: dict[str, list[int]] = {}
+        for index, row in enumerate(rows):
+            groups.setdefault(str(row.get("prompt_id") or ""), []).append(index)
+        for indices in groups.values():
+            valid_count = sum(_is_quality_valid_event(rows[index]) for index in indices)
+            eligible_count = sum(is_population_eligible_event(rows[index]) for index in indices)
+            active = valid_count >= 2
+            for index in indices:
+                rows[index].update(group_valid_count=valid_count, group_eligible_count=eligible_count, quality_gate_active=active)
+                if self.reward_config.reward_mode == "vc_pair" and not active and is_population_eligible_event(rows[index]):
+                    reward = self.reward_config.pair_neutral_reward
+                    rewards[index] = reward
+                    rows[index].update(
+                        reward=reward,
+                        reward_label="pair_validity_gate",
+                        reward_quadrant="validity",
+                        quality_reward=0.0,
+                        frontier_bonus=0.0,
+                    )
+
+    def _reward_components(self, row: dict, reward: float) -> None:
+        copy_penalty = reward if row.get("exact_parent_copy") else 0.0
+        duplicate_penalty = reward if row.get("archive_duplicate") or row.get("profile_duplicate") else 0.0
+        special = bool(copy_penalty or duplicate_penalty)
+        eligible = is_population_eligible_event(row)
+        validity_reward = reward if not special and (not eligible or self.reward_config.reward_mode == "validity_only") else 0.0
+        frontier_bonus = 0.0 if special else float(row.get("frontier_bonus") or 0.0)
+        quality_reward = 0.0 if special or not eligible or self.reward_config.reward_mode == "validity_only" else float(row.get("quality_reward", reward - frontier_bonus) or 0.0)
+        row.update(
+            validity_reward=validity_reward,
+            quality_reward=quality_reward,
+            frontier_bonus=frontier_bonus,
+            copy_penalty=copy_penalty,
+            duplicate_penalty=duplicate_penalty,
+            total_reward=reward,
+        )
 
     def _shuffle_performance_rewards(self, rows: list[dict], rewards: list) -> None:
         if self.reward_config.reward_mode != "performance_shuffled":
@@ -548,14 +683,14 @@ class EoHGRPOReward:
         return {**base, "reward": _clip(rp, -1.0, 0.0) * cfg.q3_scale,
                 "reward_label": "q3_continuous", "reward_quadrant": "q3"}
 
-    def _failure(self, label: str, *, parse_success: bool, reward: float | None = None) -> dict:
+    def _failure(self, label: str, *, code_parse_success: bool, reward: float | None = None) -> dict:
         r = reward if reward is not None else self.reward_config.reward_parse_fail
         result = self.reward_config.invalid_result(label, r)
         return {
             **result,
             "failure_label": label,
             "validity": False,
-            "parse_success": bool(parse_success),
+            "code_parse_success": bool(code_parse_success),
             "exec_success": False,
             "beats_parent": False,
             "beats_frontier": False,
@@ -567,8 +702,8 @@ class EoHGRPOReward:
 
     @staticmethod
     def _event(row: dict) -> dict:
-        event = {key: row.get(key) for key in "prompt_id operator_type parent_ids parent_best_id parent_best_score population_best_score completion_index sample_order score reward reward_label reward_quadrant delta_parent delta_parent_rel delta_frontier delta_frontier_rel paired_outcome paired_n paired_candidate_mean paired_parent_mean paired_mean paired_std paired_se paired_threshold paired_win_rate strategy function failure_label input_tokens output_tokens tokens_total".split()}
-        event.update({key: bool(row.get(key, False)) for key in "validity parse_success evaluation_attempted exec_success beats_parent beats_frontier ties_parent performance_improved exact_parent_copy archive_duplicate random_algo score_metadata_leak registered_to_population survived_main_population blocked_from_population".split()})
+        event = {key: row.get(key) for key in "prompt_id operator_type parent_ids parent_best_id parent_best_score population_best_score completion_index sample_order score reward total_reward reward_label reward_quadrant validity_reward quality_reward frontier_bonus copy_penalty duplicate_penalty group_valid_count group_eligible_count delta_parent delta_parent_rel delta_frontier delta_frontier_rel paired_outcome paired_n paired_candidate_mean paired_parent_mean paired_differences paired_mean paired_std paired_se paired_confidence paired_critical_value paired_ci_low paired_ci_high paired_delta paired_delta_rel paired_evidence paired_evidence_strength paired_win_rate frontier_paired_outcome frontier_paired_mean frontier_paired_se frontier_paired_ci_low frontier_paired_ci_high frontier_paired_delta frontier_paired_evidence frontier_paired_evidence_strength strategy function failure_label input_tokens output_tokens tokens_total".split()}
+        event.update({key: bool(row.get(key, False)) for key in "idea_contract_success format_contract_success code_parse_success full_contract_success validity evaluation_attempted exec_success quality_gate_active beats_parent beats_frontier ties_parent performance_improved exact_parent_copy archive_duplicate profile_duplicate random_algo score_metadata_leak registered_to_population survived_main_population blocked_from_population".split()})
         return event
 
     def _resolve_meta(self, prompt: str) -> dict:
@@ -580,22 +715,8 @@ class EoHGRPOReward:
         return matches[0]
 
     def _is_exact_parent_copy(self, function: str, parent_codes: list[str]) -> bool:
-        normalized = self._normalize_code(function)
-        return bool(normalized) and any(normalized == self._normalize_code(code) for code in parent_codes or [])
-
-    def _normalize_code(self, code: str) -> str:
-        text = str(code or "").strip()
-        if not text:
-            return ""
-        try:
-            func = TextFunctionProgramConverter.text_to_function(text)
-        except Exception:
-            try:
-                func = SampleTrimmer.sample_to_function(text, self.template_program)
-            except Exception:
-                func = None
-        body = str(func.body if func is not None else text).strip()
-        return "\n".join(line.rstrip() for line in body.splitlines()).strip()
+        normalized = function_key(function)
+        return bool(normalized) and any(normalized == function_key(code) for code in parent_codes or [])
 
     @staticmethod
     def _text(obj: Any, *, last: bool = False) -> str:
@@ -678,7 +799,7 @@ class ResidentGRPOPolicy:
         "max_prompt_length", "max_completion_length", "temperature", "top_p",
         "beta", "epsilon", "epsilon_high", "scale_rewards", "loss_type",
         "num_iterations", "importance_sampling_level", "mask_truncated_completions",
-        "gpu_memory_utilization",
+        "gpu_memory_utilization", "trainer_lifecycle",
     )
     _REQUIRED_TRL_ARGS = (
         "num_generations", "generation_batch_size", "max_prompt_length",
@@ -706,24 +827,35 @@ class ResidentGRPOPolicy:
         self._inference_lora_request = None
         self._synced_lora_name = None
         self._model = self._tokenizer = self._fast_language_model_cls = None
+        self._trainer = None
+        self._trainer_init_count = 0
+        self._kl_reference_signature = None
+        self._kl_reference_norm = None
+        self._raw_load_lora = None
         self._optimizer_steps = 0
         self._inference_prepared = False
         self._require_config()
+        self._trainer_lifecycle = str(self.config["trainer_lifecycle"]).strip().lower()
+        if self._trainer_lifecycle not in {"persistent", "reset"}:
+            raise ValueError("grpo.trainer_lifecycle must be persistent or reset")
         self._load_model()
 
     def draw_samples(self, prompt: str | Any, n: int, *args, **kwargs) -> list[str]:
-        del args, kwargs
+        del args
         if n <= 0:
             return []
         from vllm import SamplingParams
 
         request = self.prepare_for_inference()
-        sampling = SamplingParams(
+        sampling_args = dict(
             n=min(int(n), 64),
             max_tokens=int(self.config["max_completion_length"]),
             temperature=float(self.config["temperature"]),
             top_p=float(self.config["top_p"]),
         )
+        if kwargs.get("seed") is not None:
+            sampling_args["seed"] = int(kwargs["seed"])
+        sampling = SamplingParams(**sampling_args)
         kwargs_fast = {"sampling_params": sampling, "use_tqdm": False}
         if request is not None:
             kwargs_fast["lora_request"] = request
@@ -744,6 +876,7 @@ class ResidentGRPOPolicy:
         enable_ast_gate: bool = False,
         training_enabled: bool = True,
         known_functions: list[str] | None = None,
+        known_profiles: list[list[float]] | None = None,
         **_,
     ) -> dict:
         if not prompt_records:
@@ -763,6 +896,7 @@ class ResidentGRPOPolicy:
             reward_eval_workers=reward_eval_workers,
             enable_ast_gate=enable_ast_gate,
             known_functions=known_functions,
+            known_profiles=known_profiles,
         )
         started = time.time()
         try:
@@ -817,8 +951,9 @@ class ResidentGRPOPolicy:
     def _rollout_without_training(self, records: list[dict], callback: EoHGRPOReward) -> dict:
         group_size = int(self.config["num_generations"])
         prompts, completions = [], []
-        for record in records:
-            outputs = self.draw_samples(record["messages"], group_size)
+        for index, record in enumerate(records):
+            seed = record.get("sampling_seed")
+            outputs = self.draw_samples(record["messages"], group_size, seed=_trainer_seed(self.config.get("seed", 0), index) if seed is None else seed)
             outputs.extend([""] * (group_size - len(outputs)))
             prompts.extend([record["messages"]] * group_size)
             completions.extend(outputs[:group_size])
@@ -844,6 +979,7 @@ class ResidentGRPOPolicy:
             pass
         self._inference_lora_request = None
         self._synced_lora_name = None
+        self._trainer = None
         self._model = self._tokenizer = None
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
@@ -918,16 +1054,27 @@ class ResidentGRPOPolicy:
         effective_args["per_device_train_batch_size"] = grouped_batch_size
         effective_args["generation_batch_size"] = grouped_batch_size
         effective_args["gradient_accumulation_steps"] = 1
-        trainer_kwargs = {"model": self._model, "reward_funcs": reward_func, "args": GRPOConfig(**effective_args), "train_dataset": dataset}
-        trainer_kwargs["processing_class" if "processing_class" in set(inspect.signature(GRPOTrainer).parameters) else "tokenizer"] = self._tokenizer
-        train_result = trainer = None
         started = time.time()
         quiet = _bool(self.config.get("quiet_training_output", False))
         log_path = os.path.join(output_dir, "trainer_output.log")
+        trainer_init_started = time.time()
+        trainer_reused = self._trainer is not None
+        if not trainer_reused:
+            kwargs = {"model": self._model, "reward_funcs": reward_func, "args": GRPOConfig(**effective_args), "train_dataset": dataset}
+            kwargs["processing_class" if "processing_class" in set(inspect.signature(GRPOTrainer).parameters) else "tokenizer"] = self._tokenizer
+            self._trainer = GRPOTrainer(**kwargs)
+            self._trainer_init_count += 1
+            self._ensure_kl_reference_adapter()
+            self._capture_kl_reference()
+        trainer = self._trainer
+        self._configure_trainer_update(trainer, dataset, reward_func, effective_args)
+        if trainer_reused and self._trainer_lifecycle == "reset":
+            trainer.optimizer = trainer.lr_scheduler = None
+            trainer._created_lr_scheduler = False
+        optimizer_before = self._optimizer_identity(trainer.optimizer)
+        train_result = None
         try:
             with _redirect_training_output(log_path, enabled=quiet):
-                trainer_init_started = time.time()
-                trainer = GRPOTrainer(**trainer_kwargs)
                 actual_args = {key: getattr(trainer.args, key, value) for key, value in effective_args.items()}
                 drift = {
                     key: (effective_args[key], actual_args[key])
@@ -941,20 +1088,36 @@ class ResidentGRPOPolicy:
                 train_result = trainer.train()
             metrics = dict(getattr(train_result, "metrics", {}) or {})
             metrics.setdefault("loss", metrics.get("train_loss", 0.0))
-            self._optimizer_steps += int(getattr(getattr(trainer, "state", None), "global_step", 0) or 0)
+            steps = int(getattr(getattr(trainer, "state", None), "global_step", 0) or 0)
+            self._optimizer_steps += steps
+            optimizer_after = self._optimizer_identity(trainer.optimizer)
+            optimizer_reinitialized = optimizer_before is None or optimizer_before != optimizer_after
+            if trainer_reused and self._trainer_lifecycle == "persistent" and optimizer_reinitialized:
+                raise RuntimeError("persistent trainer replaced the optimizer")
+            if trainer_reused and self._trainer_lifecycle == "reset" and not optimizer_reinitialized:
+                raise RuntimeError("reset ablation did not rebuild the optimizer")
+            reference_fixed = self._kl_reference_is_fixed()
+            if reference_fixed is False:
+                raise RuntimeError("KL reference adapter changed during online training")
             step_metrics = next((row for row in reversed(trainer.state.log_history) if "loss" in row), {})
             metrics.update(
                 grpo_effective_args=actual_args,
-                optimizer_steps_this_update=int(getattr(getattr(trainer, "state", None), "global_step", 0) or 0),
+                trainer_lifecycle=self._trainer_lifecycle,
+                trainer_reused=trainer_reused,
+                trainer_init_count=self._trainer_init_count,
+                optimizer_steps_this_update=steps,
                 optimizer_steps_total=self._optimizer_steps,
-                optimizer_reinitialized=True,
-                optimizer_state_reused=False,
+                optimizer_reinitialized=optimizer_reinitialized,
+                optimizer_state_reused=bool(trainer_reused and not optimizer_reinitialized),
+                kl_reference_fixed=reference_fixed,
+                kl_reference_source="initial_adapter" if reference_fixed is not None else "disabled_beta_zero",
+                kl_reference_norm=self._kl_reference_norm,
                 grpo_step_metrics=step_metrics,
                 adapter_norm_before=adapter_norm_before,
                 adapter_norm_after=self._trainable_norm(),
                 trainer_seed=trainer_seed,
                 trainer_output_log=log_path if quiet else None,
-                trl_trainer_init_elapsed=train_started - trainer_init_started,
+                trl_trainer_init_elapsed=train_started - trainer_init_started if not trainer_reused else 0.0,
                 trl_trainer_train_elapsed=time.time() - train_started,
                 trl_trainer_total_elapsed=time.time() - started,
             )
@@ -965,8 +1128,80 @@ class ResidentGRPOPolicy:
             except Exception:
                 pass
             del train_result
-            del trainer
             gc.collect()
+
+    @staticmethod
+    def _optimizer_identity(optimizer):
+        while optimizer is not None and hasattr(optimizer, "optimizer"):
+            optimizer = optimizer.optimizer
+        return None if optimizer is None else id(optimizer)
+
+    def _configure_trainer_update(self, trainer, dataset, reward_func, args: dict) -> None:
+        trainer.train_dataset = dataset
+        trainer.reward_funcs = [reward_func]
+        trainer.reward_func_names = [reward_func.__name__]
+        trainer._buffered_inputs = None
+        trainer._step = 0
+        for key, value in args.items():
+            setattr(trainer.args, key, value)
+
+    def _reference_parameters(self):
+        return [(name, param) for name, param in self._model.named_parameters() if ".ref." in name]
+
+    def _ensure_kl_reference_adapter(self) -> None:
+        if float(self.config["beta"]) == 0.0:
+            return
+        adapters = getattr(self._model, "peft_config", None)
+        if not isinstance(adapters, dict) or "default" not in adapters:
+            raise RuntimeError("fixed KL reference requires a PEFT default adapter")
+        if "ref" not in adapters:
+            self._model.add_adapter("ref", copy.deepcopy(adapters["default"]))
+            for name, param in self._model.named_parameters():
+                if ".default." in name:
+                    self._model.get_parameter(name.replace(".default.", ".ref.")).data.copy_(param.data)
+        for _, param in self._reference_parameters():
+            param.requires_grad_(False)
+        self._patch_lora_loader()
+
+    def _patch_lora_loader(self) -> None:
+        if self._raw_load_lora is not None:
+            return
+        self._raw_load_lora = self._model.load_lora
+
+        def load_default(*args, **kwargs):
+            return self._default_lora_request(self._raw_load_lora(*args, **kwargs))
+
+        self._model.load_lora = load_default
+
+    @staticmethod
+    def _default_lora_request(request):
+        tensors = getattr(request, "lora_tensors", None)
+        if not isinstance(tensors, dict) or not any(".ref." in key for key in tensors):
+            return request
+        from vllm.lora.request import LoRARequest
+
+        return LoRARequest(
+            request.lora_name,
+            request.lora_int_id,
+            lora_tensors={key: value for key, value in tensors.items() if ".ref." not in key},
+            lora_config=request.lora_config,
+        )
+
+    def _capture_kl_reference(self) -> None:
+        if float(self.config["beta"]) == 0.0:
+            return
+        params = self._reference_parameters()
+        if not params or any(param.requires_grad for _, param in params):
+            raise RuntimeError("GRPO did not create a frozen reference adapter")
+        self._kl_reference_signature = tuple((name, id(param), int(param._version)) for name, param in params)
+        total = sum(param.detach().float().square().sum() for _, param in params)
+        self._kl_reference_norm = float(total.sqrt().item())
+
+    def _kl_reference_is_fixed(self):
+        if self._kl_reference_signature is None:
+            return None
+        current = tuple((name, id(param), int(param._version)) for name, param in self._reference_parameters())
+        return current == self._kl_reference_signature
 
     def _trainable_norm(self) -> float:
         params = [param.detach().float() for param in self._model.parameters() if param.requires_grad]
@@ -1025,7 +1260,7 @@ class ResidentGRPOPolicy:
         if os.path.exists(path):
             shutil.rmtree(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self._model.save_pretrained(path)
+        self._model.save_pretrained(path, selected_adapters=["default"])
         logger.info("[EoHRLGRPO] saved adapter path=%s", path)
         return path
 
